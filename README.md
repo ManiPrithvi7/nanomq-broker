@@ -21,6 +21,15 @@ MQTT broker only, decoupled from **mqtt-publisher-lite**. Deploy this folder as 
 4. **Variables:** see `env.railway.example` (production: three `NANOMQ_TLS_*` PEMs; no `NANOMQ_DISABLE_TLS`).
 5. **Networking → Public TCP Proxy:** map a public port to container **8883** (mTLS).
 
+### PEMs in Railway (newlines)
+
+- Prefer **Variables → Raw editor** (`</>`) and paste PEMs with **real line breaks** (`-----BEGIN` on its own line).
+- If the UI stores PEMs as **one line** with literal `\n` sequences, `docker-entrypoint.sh` normalizes them with `sed 's/\\n/\n/g'` before NanoMQ reads the files.
+
+### One-off PEM validation in logs
+
+Set **`NANOMQ_DEBUG_CERTS=1`** on the broker service (then redeploy). On startup, if `openssl` is available in the image, the entrypoint logs CA/broker cert subjects and checks the broker private key. Remove or unset after debugging.
+
 ## mqtt-publisher-lite (separate service)
 
 Point the app at the **public TCP host and port** Railway shows for the broker (not the internal hostname, unless you only use private networking).

@@ -23,14 +23,26 @@ if [ "$disable_tls" = true ]; then
 fi
 
 # Prefer env vars when all three are set (Railway secrets).
+# Railway/UI often stores multiline PEMs as one line with literal "\n" — restore real newlines for mbedTLS.
 if [ -n "$NANOMQ_TLS_CA_CERT" ] && [ -n "$NANOMQ_TLS_CERT" ] && [ -n "$NANOMQ_TLS_KEY" ]; then
-  printf '%s' "$NANOMQ_TLS_CA_CERT" > "$CERT_DIR/root_ca.crt"
+  printf '%s' "$NANOMQ_TLS_CA_CERT" | sed 's/\\n/\n/g' > "$CERT_DIR/root_ca.crt"
   chmod 644 "$CERT_DIR/root_ca.crt"
-  printf '%s' "$NANOMQ_TLS_CERT" > "$CERT_DIR/broker.crt"
+  printf '%s' "$NANOMQ_TLS_CERT" | sed 's/\\n/\n/g' > "$CERT_DIR/broker.crt"
   chmod 644 "$CERT_DIR/broker.crt"
-  printf '%s' "$NANOMQ_TLS_KEY" > "$CERT_DIR/broker.key"
+  printf '%s' "$NANOMQ_TLS_KEY" | sed 's/\\n/\n/g' > "$CERT_DIR/broker.key"
   chmod 600 "$CERT_DIR/broker.key"
-  echo "[nanomq] Wrote TLS PEMs from environment variables."
+  echo "[nanomq] Wrote TLS PEMs from environment variables (newlines normalized)."
+
+  if [ "${NANOMQ_DEBUG_CERTS:-}" = 1 ] || [ "${NANOMQ_DEBUG_CERTS:-}" = true ]; then
+    if command -v openssl >/dev/null 2>&1; then
+      echo "[nanomq] NANOMQ_DEBUG_CERTS: validating written PEMs..."
+      openssl x509 -in "$CERT_DIR/root_ca.crt" -noout -subject && echo "[nanomq] CA cert OK" || echo "[nanomq] WARN: CA cert parse failed" >&2
+      openssl x509 -in "$CERT_DIR/broker.crt" -noout -subject && echo "[nanomq] Broker cert OK" || echo "[nanomq] WARN: Broker cert parse failed" >&2
+      openssl rsa -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null && echo "[nanomq] Broker key OK" || openssl ec -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null && echo "[nanomq] Broker key OK (EC)" || echo "[nanomq] WARN: Broker key check failed" >&2
+    else
+      echo "[nanomq] NANOMQ_DEBUG_CERTS set but openssl not in PATH; skipping PEM checks."
+    fi
+  fi
 elif [ -f "$CERT_DIR/root_ca.crt" ] && [ -f "$CERT_DIR/broker.crt" ] && [ -f "$CERT_DIR/broker.key" ]; then
   chmod 644 "$CERT_DIR/root_ca.crt" "$CERT_DIR/broker.crt" 2>/dev/null || true
   chmod 600 "$CERT_DIR/broker.key" 2>/dev/null || true
