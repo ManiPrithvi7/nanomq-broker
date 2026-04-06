@@ -1,7 +1,7 @@
 # Standalone NanoMQ — build context MUST be this directory (nanomq-broker/).
 # docker build -t proof-nanomq .
 # Railway: set service Root Directory to nanomq-broker (or deploy from this folder only).
-FROM emqx/nanomq:latest-slim
+FROM emqx/nanomq:latest
 
 COPY nanomq.conf /etc/nanomq.conf
 COPY nanomq.plain.conf /etc/nanomq.plain.conf
