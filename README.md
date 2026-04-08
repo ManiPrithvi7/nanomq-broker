@@ -7,6 +7,7 @@ MQTT broker only, decoupled from **mqtt-publisher-lite**. Deploy this folder as 
 | File | Purpose |
 |------|---------|
 | `Dockerfile` | NanoMQ image; build context = **this directory** |
+| `generate-broker-cert-openssl.sh` | Issue `certs/broker.{crt,key}` from shared Root CA (optional `BROKER_SAN_IPS`) |
 | `nanomq.conf` | mTLS listener on **8883**, `verify_peer` + `fail_if_no_peer_cert` |
 | `nanomq.plain.conf` | Plain MQTT **1883** (staging only) |
 | `docker-entrypoint.sh` | Writes PEMs from `NANOMQ_TLS_*` or uses mounted `/etc/nanomq/certs/` |
@@ -34,14 +35,13 @@ Set **`NANOMQ_DEBUG_CERTS=1`** on the broker service (then redeploy). On startup
 
 Point the app at the **public TCP host and port** Railway shows for the broker (not the internal hostname, unless you only use private networking).
 
-Set (names match `src/config/index.ts`):
+Set (names match mqtt-publisher-lite `src/config/index.ts`):
 
 - `MQTT_BROKER` — hostname only (no `mqtts://` prefix in env; TLS is toggled separately)
 - `MQTT_PORT` — external TCP port mapped to **8883**
 - `MQTT_TLS_ENABLED=true` (or `MQTT_TLS=true`)
-- `MQTT_TLS_CA_PATH` — trust store for broker + chain (same Root CA)
-- `MQTT_TLS_CLIENT_CERT_PATH` / `MQTT_TLS_CLIENT_KEY_PATH` — **backend’s** MQTT client cert/key (issued by same CA as devices)
-- `MQTT_TLS_SERVERNAME` — if the TCP hostname does not match the CN/SAN on `broker.crt`
+- `MQTT_TLS_CA_BASE64` / `MQTT_TLS_CLIENT_CERT_BASE64` / `MQTT_TLS_CLIENT_KEY_BASE64` — PEM material (same Root CA as broker/devices)
+- `MQTT_TLS_SERVERNAME` or `MQTT_TLS_VERIFY_HOST` — if the TCP hostname does not match the CN/SAN on `broker.crt` (e.g. `PROOF-nanomq-broker`)
 
 Issue a **dedicated** server client cert (do not reuse a device identity).
 
