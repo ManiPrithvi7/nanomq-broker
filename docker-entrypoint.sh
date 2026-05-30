@@ -38,6 +38,14 @@ if [ -n "$NANOMQ_TLS_CA_CERT" ] && [ -n "$NANOMQ_TLS_CERT" ] && [ -n "$NANOMQ_TL
       echo "[nanomq] NANOMQ_DEBUG_CERTS: validating written PEMs..."
       openssl x509 -in "$CERT_DIR/root_ca.crt" -noout -subject && echo "[nanomq] CA cert OK" || echo "[nanomq] WARN: CA cert parse failed" >&2
       openssl x509 -in "$CERT_DIR/broker.crt" -noout -subject && echo "[nanomq] Broker cert OK" || echo "[nanomq] WARN: Broker cert parse failed" >&2
+      openssl verify -CAfile "$CERT_DIR/root_ca.crt" "$CERT_DIR/broker.crt" && echo "[nanomq] Broker chain OK" || echo "[nanomq] WARN: Broker chain verify failed" >&2
+      _crt_mod="$(openssl x509 -noout -modulus -in "$CERT_DIR/broker.crt" 2>/dev/null | openssl md5 2>/dev/null || true)"
+      _key_mod="$(openssl rsa -noout -modulus -in "$CERT_DIR/broker.key" 2>/dev/null | openssl md5 2>/dev/null || openssl ec -noout -modulus -in "$CERT_DIR/broker.key" 2>/dev/null | openssl md5 2>/dev/null || true)"
+      if [ -n "$_crt_mod" ] && [ "$_crt_mod" = "$_key_mod" ]; then
+        echo "[nanomq] Broker cert/key modulus match OK"
+      else
+        echo "[nanomq] WARN: Broker cert/key modulus mismatch" >&2
+      fi
       openssl rsa -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null && echo "[nanomq] Broker key OK" || openssl ec -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null && echo "[nanomq] Broker key OK (EC)" || echo "[nanomq] WARN: Broker key check failed" >&2
     else
       echo "[nanomq] NANOMQ_DEBUG_CERTS set but openssl not in PATH; skipping PEM checks."
@@ -55,5 +63,23 @@ else
   exit 1
 fi
 
-echo "[nanomq] Starting mTLS broker (config: $CONF_TLS)."
-exec nanomq start --conf "$CONF_TLS"
+CONF_RUN="$CONF_TLS"
+if [ -n "${NANOMQ_LOG_LEVEL:-}" ]; then
+  CONF_RUN="/tmp/nanomq.runtime.conf"
+  sed "s/^  level = .*/  level = ${NANOMQ_LOG_LEVEL}/" "$CONF_TLS" > "$CONF_RUN"
+  echo "[nanomq] Log level override: ${NANOMQ_LOG_LEVEL} (runtime config: $CONF_RUN)."
+fi
+
+if [ "${NANOMQ_DEBUG_CERTS:-}" = 1 ] || [ "${NANOMQ_DEBUG_CERTS:-}" = true ]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "[nanomq] NANOMQ_DEBUG_CERTS: PEM SHA256:"
+    sha256sum "$CERT_DIR"/* 2>/dev/null || true
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    echo "[nanomq] Broker cert SANs:"
+    openssl x509 -in "$CERT_DIR/broker.crt" -noout -ext subjectAltName 2>/dev/null || true
+  fi
+fi
+
+echo "[nanomq] Starting mTLS broker (config: $CONF_RUN)."
+exec nanomq start --conf "$CONF_RUN"

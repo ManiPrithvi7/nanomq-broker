@@ -7,7 +7,8 @@ MQTT broker only, decoupled from **mqtt-publisher-lite**. Deploy this folder as 
 | File | Purpose |
 |------|---------|
 | `Dockerfile` | NanoMQ image; build context = **this directory** |
-| `generate-broker-cert-openssl.sh` | Issue `certs/broker.{crt,key}` from shared Root CA (optional `BROKER_SAN_IPS`) |
+| `generate-broker-cert-openssl.sh` | Issue `certs/broker.{crt,key}` from shared Root CA (`BROKER_RAILWAY_PROXY_HOST`, `BROKER_SAN_DNS`, `BROKER_SAN_IPS`) |
+| `print-railway-broker-env.sh` | Print raw PEM blocks for Railway `NANOMQ_TLS_*` variables |
 | `nanomq.conf` | mTLS listener on **8883**, `verify_peer` + `fail_if_no_peer_cert` |
 | `nanomq.plain.conf` | Plain MQTT **1883** (staging only) |
 | `docker-entrypoint.sh` | Writes PEMs from `NANOMQ_TLS_*` or uses mounted `/etc/nanomq/certs/` |
@@ -29,7 +30,37 @@ MQTT broker only, decoupled from **mqtt-publisher-lite**. Deploy this folder as 
 
 ### One-off PEM validation in logs
 
-Set **`NANOMQ_DEBUG_CERTS=1`** on the broker service (then redeploy). On startup, if `openssl` is available in the image, the entrypoint logs CA/broker cert subjects and checks the broker private key. Remove or unset after debugging.
+Set **`NANOMQ_DEBUG_CERTS=1`** on the broker service (then redeploy). On startup the entrypoint logs PEM SHA256 sums, SAN list, chain verify, and cert/key modulus match. Remove after debugging.
+
+Set **`NANOMQ_LOG_LEVEL=info`** (or `debug`) for one deploy to surface NanoMQ SSL listener lines in logs. Do not set `NANOMQ_TLS_ENABLE` (unused).
+
+### Broker certificate SANs (Railway TCP proxy)
+
+Clients validate the server cert against the **hostname they connect to**. If using Railway’s public TCP proxy (`*.proxy.rlwy.net`), that hostname must be in the broker cert SANs.
+
+```bash
+# Default includes yamabiko.proxy.rlwy.net; override if Railway assigns a new proxy host:
+BROKER_RAILWAY_PROXY_HOST=your-host.proxy.rlwy.net ./generate-broker-cert-openssl.sh
+./print-railway-broker-env.sh   # paste into Railway Variables → Raw editor
+```
+
+Regenerate and update **`NANOMQ_TLS_CERT`** + **`NANOMQ_TLS_KEY`** on Railway after any cert change. **`NANOMQ_TLS_CA_CERT`** stays the same unless you rotate the Root CA.
+
+**Temporary workaround (no cert regen):** set `MQTT_TLS_SERVERNAME=PROOF-nanomq-broker` on clients — only helps when SNI is overridden; connecting to the proxy hostname still fails hostname verify without the SAN.
+
+### External mTLS smoke test
+
+```bash
+openssl s_client -connect yamabiko.proxy.rlwy.net:43439 -servername yamabiko.proxy.rlwy.net \
+  -CAfile ../statsmqtt/data/ca/root-ca.crt \
+  -cert /path/to/client.crt -key /path/to/client.key
+```
+
+```bash
+openssl s_client -connect broker.withproof.io:43439 -servername broker.withproof.io \
+  -CAfile ../statsmqtt/data/ca/root-ca.crt \
+  -cert /path/to/client.crt -key /path/to/client.key
+```
 
 ## mqtt-publisher-lite (separate service)
 
