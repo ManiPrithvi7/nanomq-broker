@@ -1,6 +1,6 @@
-# NanoMQ broker only — deploy as its own Railway service.
-# Railway → New Service → same GitHub repo → Settings → Root Directory = nanomq-broker
-# Config-as-code: this file (default railway.toml in that directory).
+# NanoMQ broker only — deploy as its own Railway service (e.g. nanomq-broker-private).
+# Railway → New Service → same GitHub repo → Settings → Root Directory = . (repo root)
+# Deploy method: Dockerfile only — do NOT use docker-compose.yml on Railway for production.
 
 [build]
 builder = "DOCKERFILE"

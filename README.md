@@ -18,32 +18,39 @@ MQTT broker only, decoupled from **mqtt-publisher-lite**. Deploy this folder as 
 | `docker-compose.yml` | Local stack: broker + Caddy on host `:8883` |
 | `.env.compose.example` | Optional compose overrides (Root CA path, debug) |
 
-## Manual deployment checklist
+## Migrate from Railway Compose (one service) to two services
 
-After merging repo changes, complete these in Railway and DNS (see [`caddy-proxy/README.md`](caddy-proxy/README.md)):
+If you currently run **both** NanoMQ and Caddy via [`docker-compose.yml`](docker-compose.yml) in a **single** Railway service, migrate as follows. Do **not** convert the bundled Compose service in place — create **new** services.
 
-1. **Broker (`adequate-appreciation`):** Networking → remove TCP Proxy and any `broker.withproof.io` domain.
-2. **Caddy (`caddy-proxy`):** New service, Root Directory `caddy-proxy`, set `PORT` / `BROKER_*` vars, add custom domain `broker.withproof.io:8883`.
-3. **DNS:** CNAME (or ALIAS) `broker.withproof.io` → Caddy Railway domain (DNS only, no Cloudflare proxy).
-4. **Validate:** `openssl s_client -connect broker.withproof.io:8883 ...` (see smoke test below).
+| Phase | Action |
+|-------|--------|
+| **0** | Push repo with production mTLS (`verify_peer = true` in [`nanomq.conf`](nanomq.conf)). |
+| **1** | **New broker service** (e.g. `nanomq-broker-private`): Root Directory `.`, Dockerfile deploy, copy `NANOMQ_TLS_*` from old Compose service, **no** public TCP proxy or custom domain. Verify logs: `tls url: tls+nmq-tcp://0.0.0.0:8883`. |
+| **2** | **New Caddy service** (`caddy-proxy`): Root Directory `caddy-proxy`, vars from [`caddy-proxy/env.railway.example`](caddy-proxy/env.railway.example), custom domain `broker.withproof.io:8883`. |
+| **3** | On **old Compose service**, remove custom domain and TCP proxy (avoid split-brain). CNAME `broker.withproof.io` → Caddy Railway domain. Run smoke test below. |
+| **4** | **Delete** old Compose service after tests pass. |
+| **5** | Set Caddy `DEBUG` → `INFO` in [`caddy-proxy/Caddyfile`](caddy-proxy/Caddyfile), redeploy. Update mqtt-publisher-lite and devices. |
+
+Keep the old Compose service running (without public domain) until Phase 4 for rollback.
 
 ## Architecture (production)
 
-Public clients connect to **`broker.withproof.io:8883`**. A separate **Caddy L4 proxy** service forwards raw TCP over Railway private networking to this broker. Caddy does **not** terminate TLS; NanoMQ handles mTLS end-to-end.
+Public clients connect to **`broker.withproof.io:8883`**. A separate **Caddy L4 proxy** service forwards raw TCP over Railway private networking to the private broker. Caddy does **not** terminate TLS; NanoMQ handles mTLS end-to-end.
 
 ```
-Client → broker.withproof.io:8883 → caddy-proxy → adequate-appreciation.railway.internal:8883 → NanoMQ
+Client → broker.withproof.io:8883 → caddy-proxy → nanomq-broker-private.railway.internal:8883 → NanoMQ
 ```
 
 See [`caddy-proxy/README.md`](caddy-proxy/README.md) for Caddy deploy steps.
 
-## Railway — broker service (`adequate-appreciation`)
+## Railway — broker service (e.g. `nanomq-broker-private`)
 
-1. New service → same GitHub repo as the app.
+1. **New service** → same GitHub repo (do not reuse the bundled Compose service).
 2. **Settings → Root Directory:** `.` (repo root — folder containing this `Dockerfile`)
-3. **Config-as-code:** use this folder’s `railway.toml` (default).
-4. **Variables:** see `env.railway.example` (production: three `NANOMQ_TLS_*` PEMs; no `NANOMQ_DISABLE_TLS`).
-5. **Networking:** **no public TCP proxy** and **no custom domain** on the broker — private network only. Public access is via `caddy-proxy`.
+3. **Settings → Deploy:** **Dockerfile** only — **not** Compose.
+4. **Config-as-code:** use this folder’s `railway.toml` (default).
+5. **Variables:** see `env.railway.example` (production: three `NANOMQ_TLS_*` PEMs; no `NANOMQ_DISABLE_TLS`).
+6. **Networking:** **no public TCP proxy** and **no custom domain** — private network only. Public access is via `caddy-proxy`.
 
 ### PEMs in Railway (newlines)
 
@@ -84,7 +91,7 @@ Regenerate and update **`NANOMQ_TLS_CERT`** + **`NANOMQ_TLS_KEY`** on Railway af
 
 ### External mTLS smoke test
 
-After Caddy proxy and DNS are configured:
+After Caddy proxy and DNS are configured (all clients must present valid client certs — `verify_peer = true` in [`nanomq.conf`](nanomq.conf)):
 
 ```bash
 openssl s_client -connect broker.withproof.io:8883 -servername broker.withproof.io \
@@ -92,20 +99,7 @@ openssl s_client -connect broker.withproof.io:8883 -servername broker.withproof.
   -cert /path/to/client.crt -key /path/to/client.key
 ```
 
-### Re-enable production mTLS on the broker
-
-[`nanomq.conf`](nanomq.conf) may temporarily have `verify_peer = false` for handshake debugging. Before production:
-
-1. Run the `openssl s_client` test above **with** `-cert` and `-key` (client cert presented).
-2. Set in `nanomq.conf`:
-   ```
-   verify_peer          = true
-   fail_if_no_peer_cert = true
-   ```
-3. Redeploy the broker.
-4. Re-run `openssl s_client` and confirm mqtt-publisher-lite and all devices use valid client certs signed by the shared Root CA.
-
-With `verify_peer = false`, client cert tests do **not** prove production mTLS is enforced.
+Connection **without** `-cert` / `-key` should fail (mTLS enforced).
 
 ## mqtt-publisher-lite (separate service)
 
@@ -153,7 +147,7 @@ PEM options for the broker container:
 - **Volume mounts (default):** `./certs/broker.{crt,key}` plus `ROOT_CA_CRT` (default `../statsmqtt/data/ca/root-ca.crt`) — no entrypoint changes.
 - **Environment variables:** paste `print-railway-broker-env.sh` output into `.env` as `NANOMQ_TLS_*`; entrypoint uses env when all three are set.
 
-Railway production still uses **two separate services** (private broker + public Caddy). Compose is for local validation; Railway Compose deploy is optional and not required for the current two-service plan.
+Railway production uses **two separate Dockerfile services** (private broker + public Caddy). [`docker-compose.yml`](docker-compose.yml) is **local validation only** — do not deploy it as a single Railway Compose service.
 
 ## Legacy `broker/` in monorepo
 

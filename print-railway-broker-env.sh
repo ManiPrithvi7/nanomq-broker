@@ -16,7 +16,7 @@ for f in "$CA_CRT" "${CERT_DIR}/broker.crt" "${CERT_DIR}/broker.key"; do
   fi
 done
 
-echo "# Paste each block into Railway → adequate-appreciation → Variables → Raw editor."
+echo "# Paste each block into Railway → nanomq-broker-private → Variables → Raw editor."
 echo "# Unset NANOMQ_DISABLE_TLS. Do not set NANOMQ_TLS_ENABLE (unused)."
 echo "# Optional one deploy:"
 echo "#   NANOMQ_DEBUG_CERTS=1"

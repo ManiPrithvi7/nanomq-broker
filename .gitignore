@@ -1,1 +1,6 @@
 .env
+
+# Caddy L4 proxy — lives in a separate repo; keep out of proof_broker git
+caddy-proxy/
+docker-compose.yml
+.env.compose.example
