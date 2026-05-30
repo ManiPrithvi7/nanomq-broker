@@ -30,7 +30,15 @@ MQTT broker only, decoupled from **mqtt-publisher-lite**. Deploy this folder as 
 
 ### One-off PEM validation in logs
 
-Set **`NANOMQ_DEBUG_CERTS=1`** on the broker service (then redeploy). On startup the entrypoint logs PEM SHA256 sums, SAN list, chain verify, and cert/key modulus match. Remove after debugging.
+Set **`NANOMQ_DEBUG_CERTS=1`** on the broker service (then redeploy). On startup the entrypoint logs PEM SHA256 sums, **CA SHA1/SHA256 fingerprints**, SAN list, chain verify, and cert/key modulus match. Remove after debugging.
+
+Set **`NANOMQ_EXPECTED_CA_FINGERPRINT`** to your Root CA SHA1 (e.g. `9B:12:06:56:04:B4:28:73:C3:CF:1B:36:42:07:9A:CD:53:33:2D:8F`) to get an explicit **MISMATCH** warning if Railway has the wrong `NANOMQ_TLS_CA_CERT`.
+
+Local fingerprint check:
+
+```bash
+openssl x509 -in ../statsmqtt/data/ca/root-ca.crt -fingerprint -noout
+```
 
 Set **`NANOMQ_LOG_LEVEL=info`** (or `debug`) for one deploy to surface NanoMQ SSL listener lines in logs. Do not set `NANOMQ_TLS_ENABLE` (unused).
 

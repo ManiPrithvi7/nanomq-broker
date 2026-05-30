@@ -4,6 +4,8 @@
 #
 # Always pass --conf so NanoMQ does not search a wrong default path.
 # Optional overrides: NANOMQ_PLAIN_CONF, NANOMQ_TLS_CONF (default paths below).
+# Debug: NANOMQ_DEBUG_CERTS=1 logs PEM SHA256, CA fingerprint, SANs, chain verify.
+# Optional: NANOMQ_EXPECTED_CA_FINGERPRINT=9B:12:06:56:... (SHA1, colons) — WARN if CA mismatch.
 set -e
 
 CONF_PLAIN="${NANOMQ_PLAIN_CONF:-/etc/nanomq.plain.conf}"
@@ -11,6 +13,70 @@ CONF_TLS="${NANOMQ_TLS_CONF:-/etc/nanomq.conf}"
 
 CERT_DIR="/etc/nanomq/certs"
 mkdir -p "$CERT_DIR"
+
+# Normalize fingerprint for comparison: uppercase, strip "SHA1 Fingerprint=" prefix and spaces.
+_fp_norm() {
+  echo "$1" | tr '[:lower:]' '[:upper:]' | tr -d ' ' | sed 's/^SHA1FINGERPRINT=//'
+}
+
+validate_certs() {
+  if [ "${NANOMQ_DEBUG_CERTS:-}" != 1 ] && [ "${NANOMQ_DEBUG_CERTS:-}" != true ]; then
+    return 0
+  fi
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "[nanomq] NANOMQ_DEBUG_CERTS: PEM SHA256:"
+    sha256sum "$CERT_DIR"/* 2>/dev/null || true
+  fi
+
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "[nanomq] NANOMQ_DEBUG_CERTS set but openssl not in PATH; skipping PEM checks."
+    return 0
+  fi
+
+  echo "[nanomq] NANOMQ_DEBUG_CERTS: validating written PEMs..."
+  openssl x509 -in "$CERT_DIR/root_ca.crt" -noout -subject && echo "[nanomq] CA cert OK" || echo "[nanomq] WARN: CA cert parse failed" >&2
+  openssl x509 -in "$CERT_DIR/broker.crt" -noout -subject && echo "[nanomq] Broker cert OK" || echo "[nanomq] WARN: Broker cert parse failed" >&2
+
+  _ca_fp="$(openssl x509 -in "$CERT_DIR/root_ca.crt" -fingerprint -noout 2>/dev/null || true)"
+  _ca_fp_sha256="$(openssl x509 -in "$CERT_DIR/root_ca.crt" -fingerprint -sha256 -noout 2>/dev/null || true)"
+  _broker_fp="$(openssl x509 -in "$CERT_DIR/broker.crt" -fingerprint -noout 2>/dev/null || true)"
+  echo "[nanomq] CA fingerprint (SHA1): ${_ca_fp}"
+  echo "[nanomq] CA fingerprint (SHA256): ${_ca_fp_sha256}"
+  echo "[nanomq] Broker cert fingerprint (SHA1): ${_broker_fp}"
+
+  if [ -n "${NANOMQ_EXPECTED_CA_FINGERPRINT:-}" ]; then
+    _expected="$(_fp_norm "$NANOMQ_EXPECTED_CA_FINGERPRINT")"
+    _actual="$(_fp_norm "$_ca_fp")"
+    if [ "$_actual" = "$_expected" ]; then
+      echo "[nanomq] CA fingerprint matches NANOMQ_EXPECTED_CA_FINGERPRINT OK"
+    else
+      echo "[nanomq] WARN: CA fingerprint MISMATCH — broker may be using the wrong Root CA." >&2
+      echo "[nanomq]   expected: SHA1 Fingerprint=${NANOMQ_EXPECTED_CA_FINGERPRINT}" >&2
+      echo "[nanomq]   actual:   ${_ca_fp}" >&2
+      echo "[nanomq]   Fix NANOMQ_TLS_CA_CERT on Railway (Raw editor, full PEM, no truncation)." >&2
+    fi
+  else
+    echo "[nanomq] Tip: set NANOMQ_EXPECTED_CA_FINGERPRINT to auto-detect wrong CA on deploy."
+  fi
+
+  openssl verify -CAfile "$CERT_DIR/root_ca.crt" "$CERT_DIR/broker.crt" && echo "[nanomq] Broker chain OK" || echo "[nanomq] WARN: Broker chain verify failed" >&2
+
+  _crt_mod="$(openssl x509 -noout -modulus -in "$CERT_DIR/broker.crt" 2>/dev/null | openssl md5 2>/dev/null || true)"
+  _key_mod="$(openssl rsa -noout -modulus -in "$CERT_DIR/broker.key" 2>/dev/null | openssl md5 2>/dev/null || openssl ec -noout -modulus -in "$CERT_DIR/broker.key" 2>/dev/null | openssl md5 2>/dev/null || true)"
+  if [ -n "$_crt_mod" ] && [ "$_crt_mod" = "$_key_mod" ]; then
+    echo "[nanomq] Broker cert/key modulus match OK"
+  else
+    echo "[nanomq] WARN: Broker cert/key modulus mismatch" >&2
+  fi
+
+  openssl rsa -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null && echo "[nanomq] Broker key OK" || \
+    openssl ec -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null && echo "[nanomq] Broker key OK (EC)" || \
+    echo "[nanomq] WARN: Broker key check failed" >&2
+
+  echo "[nanomq] Broker cert SANs:"
+  openssl x509 -in "$CERT_DIR/broker.crt" -noout -ext subjectAltName 2>/dev/null || true
+}
 
 disable_tls=false
 case "${NANOMQ_DISABLE_TLS:-}" in
@@ -32,25 +98,6 @@ if [ -n "$NANOMQ_TLS_CA_CERT" ] && [ -n "$NANOMQ_TLS_CERT" ] && [ -n "$NANOMQ_TL
   printf '%s' "$NANOMQ_TLS_KEY" | sed 's/\\n/\n/g' > "$CERT_DIR/broker.key"
   chmod 600 "$CERT_DIR/broker.key"
   echo "[nanomq] Wrote TLS PEMs from environment variables (newlines normalized)."
-
-  if [ "${NANOMQ_DEBUG_CERTS:-}" = 1 ] || [ "${NANOMQ_DEBUG_CERTS:-}" = true ]; then
-    if command -v openssl >/dev/null 2>&1; then
-      echo "[nanomq] NANOMQ_DEBUG_CERTS: validating written PEMs..."
-      openssl x509 -in "$CERT_DIR/root_ca.crt" -noout -subject && echo "[nanomq] CA cert OK" || echo "[nanomq] WARN: CA cert parse failed" >&2
-      openssl x509 -in "$CERT_DIR/broker.crt" -noout -subject && echo "[nanomq] Broker cert OK" || echo "[nanomq] WARN: Broker cert parse failed" >&2
-      openssl verify -CAfile "$CERT_DIR/root_ca.crt" "$CERT_DIR/broker.crt" && echo "[nanomq] Broker chain OK" || echo "[nanomq] WARN: Broker chain verify failed" >&2
-      _crt_mod="$(openssl x509 -noout -modulus -in "$CERT_DIR/broker.crt" 2>/dev/null | openssl md5 2>/dev/null || true)"
-      _key_mod="$(openssl rsa -noout -modulus -in "$CERT_DIR/broker.key" 2>/dev/null | openssl md5 2>/dev/null || openssl ec -noout -modulus -in "$CERT_DIR/broker.key" 2>/dev/null | openssl md5 2>/dev/null || true)"
-      if [ -n "$_crt_mod" ] && [ "$_crt_mod" = "$_key_mod" ]; then
-        echo "[nanomq] Broker cert/key modulus match OK"
-      else
-        echo "[nanomq] WARN: Broker cert/key modulus mismatch" >&2
-      fi
-      openssl rsa -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null && echo "[nanomq] Broker key OK" || openssl ec -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null && echo "[nanomq] Broker key OK (EC)" || echo "[nanomq] WARN: Broker key check failed" >&2
-    else
-      echo "[nanomq] NANOMQ_DEBUG_CERTS set but openssl not in PATH; skipping PEM checks."
-    fi
-  fi
 elif [ -f "$CERT_DIR/root_ca.crt" ] && [ -f "$CERT_DIR/broker.crt" ] && [ -f "$CERT_DIR/broker.key" ]; then
   chmod 644 "$CERT_DIR/root_ca.crt" "$CERT_DIR/broker.crt" 2>/dev/null || true
   chmod 600 "$CERT_DIR/broker.key" 2>/dev/null || true
@@ -63,22 +110,13 @@ else
   exit 1
 fi
 
+validate_certs
+
 CONF_RUN="$CONF_TLS"
 if [ -n "${NANOMQ_LOG_LEVEL:-}" ]; then
   CONF_RUN="/tmp/nanomq.runtime.conf"
   sed "s/^  level = .*/  level = ${NANOMQ_LOG_LEVEL}/" "$CONF_TLS" > "$CONF_RUN"
   echo "[nanomq] Log level override: ${NANOMQ_LOG_LEVEL} (runtime config: $CONF_RUN)."
-fi
-
-if [ "${NANOMQ_DEBUG_CERTS:-}" = 1 ] || [ "${NANOMQ_DEBUG_CERTS:-}" = true ]; then
-  if command -v sha256sum >/dev/null 2>&1; then
-    echo "[nanomq] NANOMQ_DEBUG_CERTS: PEM SHA256:"
-    sha256sum "$CERT_DIR"/* 2>/dev/null || true
-  fi
-  if command -v openssl >/dev/null 2>&1; then
-    echo "[nanomq] Broker cert SANs:"
-    openssl x509 -in "$CERT_DIR/broker.crt" -noout -ext subjectAltName 2>/dev/null || true
-  fi
 fi
 
 echo "[nanomq] Starting mTLS broker (config: $CONF_RUN)."
