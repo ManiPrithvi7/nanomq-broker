@@ -5,8 +5,10 @@
 # Override:
 #   CA_CRT=/path/to/root-ca.crt CA_KEY=/path/to/root-ca.key ./generate-broker-cert-openssl.sh
 #
-# Railway TCP proxy hostname (required for TLS when clients connect via *.proxy.rlwy.net):
+# Railway TCP proxy hostname (optional legacy SAN for *.proxy.rlwy.net — not needed when
+# all clients use broker.withproof.io via caddy-proxy):
 #   BROKER_RAILWAY_PROXY_HOST=yamabiko.proxy.rlwy.net ./generate-broker-cert-openssl.sh
+#   Or omit: BROKER_RAILWAY_PROXY_HOST= ./generate-broker-cert-openssl.sh
 #
 # Extra DNS SANs (comma-separated):
 #   BROKER_SAN_DNS="foo.example.com,bar.example.com" ./generate-broker-cert-openssl.sh
