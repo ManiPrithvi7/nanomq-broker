@@ -18,7 +18,9 @@ done
 
 echo "# Paste each block into Railway → adequate-appreciation → Variables → Raw editor."
 echo "# Unset NANOMQ_DISABLE_TLS. Do not set NANOMQ_TLS_ENABLE (unused)."
-echo "# Optional one deploy: NANOMQ_DEBUG_CERTS=1 and NANOMQ_LOG_LEVEL=info"
+echo "# Optional one deploy:"
+echo "#   NANOMQ_DEBUG_CERTS=1"
+echo "#   NANOMQ_EXPECTED_CA_FINGERPRINT=9B:12:06:56:04:B4:28:73:C3:CF:1B:36:42:07:9A:CD:53:33:2D:8F"
 echo ""
 echo "========== NANOMQ_TLS_CA_CERT =========="
 cat "$CA_CRT"

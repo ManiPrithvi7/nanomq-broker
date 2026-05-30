@@ -5,18 +5,40 @@
 # Always pass --conf so NanoMQ does not search a wrong default path.
 # Optional overrides: NANOMQ_PLAIN_CONF, NANOMQ_TLS_CONF (default paths below).
 # Debug: NANOMQ_DEBUG_CERTS=1 logs PEM SHA256, CA fingerprint, SANs, chain verify.
-# Optional: NANOMQ_EXPECTED_CA_FINGERPRINT=9B:12:06:56:... (SHA1, colons) — WARN if CA mismatch.
+#   Also sets log level to info unless NANOMQ_LOG_LEVEL is already set.
+# Optional: NANOMQ_EXPECTED_CA_FINGERPRINT=9B:12:06:56:... (SHA1) — WARN if CA mismatch.
 set -e
 
+NANOMQ_BIN="${NANOMQ_BIN:-/usr/local/bin/nanomq}"
 CONF_PLAIN="${NANOMQ_PLAIN_CONF:-/etc/nanomq.plain.conf}"
 CONF_TLS="${NANOMQ_TLS_CONF:-/etc/nanomq.conf}"
 
 CERT_DIR="/etc/nanomq/certs"
 mkdir -p "$CERT_DIR"
 
+# Empty NANOMQ_CONF_PATH causes "Set new conf path from env: (null)" noise; drop it.
+if [ -z "${NANOMQ_CONF_PATH:-}" ]; then
+  unset NANOMQ_CONF_PATH
+fi
+
 # Normalize fingerprint for comparison: uppercase, strip "SHA1 Fingerprint=" prefix and spaces.
 _fp_norm() {
   echo "$1" | tr '[:lower:]' '[:upper:]' | tr -d ' ' | sed 's/^SHA1FINGERPRINT=//'
+}
+
+verify_config() {
+  _conf="$1"
+  if [ ! -f "$_conf" ] || [ ! -s "$_conf" ]; then
+    echo "[nanomq] ERROR: Config not found or empty: $_conf" >&2
+    echo "[nanomq]   Check Railway Root Directory includes nanomq.conf in the Docker build context." >&2
+    exit 1
+  fi
+  echo "[nanomq] Config OK: $_conf ($(wc -c < "$_conf" | tr -d ' ') bytes)"
+  if grep -q '0.0.0.0:8883' "$_conf" 2>/dev/null; then
+    echo "[nanomq] Config declares SSL listener on 0.0.0.0:8883"
+  else
+    echo "[nanomq] WARN: Config missing bind 0.0.0.0:8883" >&2
+  fi
 }
 
 validate_certs() {
@@ -30,7 +52,7 @@ validate_certs() {
   fi
 
   if ! command -v openssl >/dev/null 2>&1; then
-    echo "[nanomq] NANOMQ_DEBUG_CERTS set but openssl not in PATH; skipping PEM checks."
+    echo "[nanomq] NANOMQ_DEBUG_CERTS set but openssl not in PATH; skipping PEM checks." >&2
     return 0
   fi
 
@@ -70,12 +92,32 @@ validate_certs() {
     echo "[nanomq] WARN: Broker cert/key modulus mismatch" >&2
   fi
 
-  openssl rsa -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null && echo "[nanomq] Broker key OK" || \
-    openssl ec -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null && echo "[nanomq] Broker key OK (EC)" || \
+  if openssl rsa -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null; then
+    echo "[nanomq] Broker key OK"
+  elif openssl ec -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null; then
+    echo "[nanomq] Broker key OK (EC)"
+  else
     echo "[nanomq] WARN: Broker key check failed" >&2
+  fi
 
   echo "[nanomq] Broker cert SANs:"
   openssl x509 -in "$CERT_DIR/broker.crt" -noout -ext subjectAltName 2>/dev/null || true
+}
+
+start_broker() {
+  _conf="$1"
+  verify_config "$_conf"
+  if [ ! -x "$NANOMQ_BIN" ] && ! command -v nanomq >/dev/null 2>&1; then
+    echo "[nanomq] ERROR: nanomq binary not found at $NANOMQ_BIN" >&2
+    exit 1
+  fi
+  _bin="$NANOMQ_BIN"
+  if [ ! -x "$_bin" ]; then
+    _bin="nanomq"
+  fi
+  echo "[nanomq] Starting broker: $_bin start --conf $_conf"
+  echo "[nanomq] Note: HTTP :8081 WARN may appear even when only TLS :8883 is used (NanoMQ REST API)."
+  exec "$_bin" start --conf "$_conf"
 }
 
 disable_tls=false
@@ -85,11 +127,10 @@ esac
 
 if [ "$disable_tls" = true ]; then
   echo "[nanomq] NANOMQ_DISABLE_TLS set — starting plain MQTT (config: $CONF_PLAIN)."
-  exec nanomq start --conf "$CONF_PLAIN"
+  start_broker "$CONF_PLAIN"
 fi
 
 # Prefer env vars when all three are set (Railway secrets).
-# Railway/UI often stores multiline PEMs as one line with literal "\n" — restore real newlines for mbedTLS.
 if [ -n "$NANOMQ_TLS_CA_CERT" ] && [ -n "$NANOMQ_TLS_CERT" ] && [ -n "$NANOMQ_TLS_KEY" ]; then
   printf '%s' "$NANOMQ_TLS_CA_CERT" | sed 's/\\n/\n/g' > "$CERT_DIR/root_ca.crt"
   chmod 644 "$CERT_DIR/root_ca.crt"
@@ -114,10 +155,15 @@ validate_certs
 
 CONF_RUN="$CONF_TLS"
 if [ -n "${NANOMQ_LOG_LEVEL:-}" ]; then
+  :
+elif [ "${NANOMQ_DEBUG_CERTS:-}" = 1 ] || [ "${NANOMQ_DEBUG_CERTS:-}" = true ]; then
+  NANOMQ_LOG_LEVEL=info
+fi
+
+if [ -n "${NANOMQ_LOG_LEVEL:-}" ]; then
   CONF_RUN="/tmp/nanomq.runtime.conf"
   sed "s/^  level = .*/  level = ${NANOMQ_LOG_LEVEL}/" "$CONF_TLS" > "$CONF_RUN"
   echo "[nanomq] Log level override: ${NANOMQ_LOG_LEVEL} (runtime config: $CONF_RUN)."
 fi
 
-echo "[nanomq] Starting mTLS broker (config: $CONF_RUN)."
-exec nanomq start --conf "$CONF_RUN"
+start_broker "$CONF_RUN"

@@ -18,7 +18,7 @@ MQTT broker only, decoupled from **mqtt-publisher-lite**. Deploy this folder as 
 ## Railway
 
 1. New service → same GitHub repo as the app.
-2. **Settings → Root Directory:** `nanomq-broker`
+2. **Settings → Root Directory:** `.` (repo root / `proof_broker` — folder containing this `Dockerfile`)
 3. **Config-as-code:** use this folder’s `railway.toml` (default).
 4. **Variables:** see `env.railway.example` (production: three `NANOMQ_TLS_*` PEMs; no `NANOMQ_DISABLE_TLS`).
 5. **Networking → Public TCP Proxy:** map a public port to container **8883** (mTLS).
@@ -30,17 +30,18 @@ MQTT broker only, decoupled from **mqtt-publisher-lite**. Deploy this folder as 
 
 ### One-off PEM validation in logs
 
-Set **`NANOMQ_DEBUG_CERTS=1`** on the broker service (then redeploy). On startup the entrypoint logs PEM SHA256 sums, **CA SHA1/SHA256 fingerprints**, SAN list, chain verify, and cert/key modulus match. Remove after debugging.
+Set **`NANOMQ_DEBUG_CERTS=1`** on the broker service (then redeploy). On startup the entrypoint logs PEM SHA256 sums, **CA SHA1/SHA256 fingerprints**, SAN list, chain verify, and cert/key modulus match. Debug mode also sets **`NANOMQ_LOG_LEVEL=info`** so logs show `tls url: tls+nmq-tcp://0.0.0.0:8883`. Remove after debugging.
 
 Set **`NANOMQ_EXPECTED_CA_FINGERPRINT`** to your Root CA SHA1 (e.g. `9B:12:06:56:04:B4:28:73:C3:CF:1B:36:42:07:9A:CD:53:33:2D:8F`) to get an explicit **MISMATCH** warning if Railway has the wrong `NANOMQ_TLS_CA_CERT`.
 
-Local fingerprint check:
+A **`Serving HTTP Server on http://(null):8081`** WARN is normal on NanoMQ 0.24 even when only TLS MQTT is used — look for **`tls url: tls+nmq-tcp://0.0.0.0:8883`** at info level instead.
+
+**Update stale Railway PEMs** after regenerating certs locally:
 
 ```bash
-openssl x509 -in ../statsmqtt/data/ca/root-ca.crt -fingerprint -noout
+./generate-broker-cert-openssl.sh
+./print-railway-broker-env.sh   # paste all three blocks into Railway Raw editor
 ```
-
-Set **`NANOMQ_LOG_LEVEL=info`** (or `debug`) for one deploy to surface NanoMQ SSL listener lines in logs. Do not set `NANOMQ_TLS_ENABLE` (unused).
 
 ### Broker certificate SANs (Railway TCP proxy)
 
