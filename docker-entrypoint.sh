@@ -7,7 +7,8 @@
 # Railway: NANOMQ_TLS_* env vars are rewritten on every start (stale PEMs under $CERT_DIR removed first).
 # Startup always logs Root CA SHA256 fingerprint + subject (openssl required).
 # Debug: NANOMQ_DEBUG_CERTS=1 adds PEM SHA256, SANs, chain verify; sets log level to info unless set.
-# Optional: NANOMQ_EXPECTED_CA_FINGERPRINT (SHA1), NANOMQ_EXPECTED_CA_FINGERPRINT_SHA256 — WARN on mismatch.
+# Optional: NANOMQ_EXPECTED_CA_FINGERPRINT (SHA1), NANOMQ_EXPECTED_CA_FINGERPRINT_SHA256.
+# When PEMs come from NANOMQ_TLS_* env, startup exits 1 if Root CA SHA256 does not match expected.
 set -e
 
 NANOMQ_BIN="${NANOMQ_BIN:-/usr/local/bin/nanomq}"
@@ -39,14 +40,46 @@ wipe_cert_dir() {
   rm -f "$CERT_DIR/root_ca.crt" "$CERT_DIR/broker.crt" "$CERT_DIR/broker.key"
 }
 
-log_root_ca_fingerprint() {
+# POSIX-safe prefix of a string (no bash ${var:0:N}).
+_str_prefix() {
+  printf '%s' "$1" | head -c "${2:-100}"
+}
+
+log_env_pem_sources() {
+  _ca_len="$(printf '%s' "${NANOMQ_TLS_CA_CERT:-}" | wc -c | tr -d ' ')"
+  _cert_len="$(printf '%s' "${NANOMQ_TLS_CERT:-}" | wc -c | tr -d ' ')"
+  _key_len="$(printf '%s' "${NANOMQ_TLS_KEY:-}" | wc -c | tr -d ' ')"
+  echo "[nanomq] NANOMQ_TLS_CA_CERT: ${_ca_len} bytes"
+  echo "[nanomq] NANOMQ_TLS_CERT: ${_cert_len} bytes"
+  echo "[nanomq] NANOMQ_TLS_KEY: ${_key_len} bytes"
+  if [ "$_ca_len" -gt 0 ]; then
+    echo "[nanomq] NANOMQ_TLS_CA_CERT first 100 chars: $(_str_prefix "$NANOMQ_TLS_CA_CERT" 100)"
+  else
+    echo "[nanomq] WARN: NANOMQ_TLS_CA_CERT is empty — will not overwrite from env." >&2
+  fi
+}
+
+verify_pem_files_written() {
+  for _f in root_ca.crt broker.crt broker.key; do
+    if [ ! -s "$CERT_DIR/$_f" ]; then
+      echo "[nanomq] ERROR: Failed to write $CERT_DIR/$_f (missing or empty after env write)." >&2
+      exit 1
+    fi
+  done
+  echo "[nanomq] PEM files on disk: root_ca.crt broker.crt broker.key (all non-empty)."
+}
+
+# _strict=1 → exit 1 on SHA256 mismatch (Railway / env-sourced PEMs).
+verify_root_ca_fingerprint() {
+  _strict="${1:-0}"
+
   if ! command -v openssl >/dev/null 2>&1; then
-    echo "[nanomq] WARN: openssl not in PATH; skipping Root CA fingerprint log." >&2
+    echo "[nanomq] WARN: openssl not in PATH; skipping Root CA fingerprint check." >&2
     return 0
   fi
   if [ ! -s "$CERT_DIR/root_ca.crt" ]; then
-    echo "[nanomq] WARN: root_ca.crt missing or empty; skipping fingerprint log." >&2
-    return 0
+    echo "[nanomq] ERROR: root_ca.crt missing or empty after write." >&2
+    exit 1
   fi
 
   echo "[nanomq] === ROOT CA FINGERPRINT (SHA256) ==="
@@ -56,27 +89,39 @@ log_root_ca_fingerprint() {
   openssl x509 -in "$CERT_DIR/root_ca.crt" -noout -subject
   _ca_fp_sha1="$(openssl x509 -in "$CERT_DIR/root_ca.crt" -noout -fingerprint 2>/dev/null || true)"
 
-  _expected_sha256="${NANOMQ_EXPECTED_CA_FINGERPRINT_SHA256:-4d2b8a685f7edbf1cd8890461dbd6666dcbc1654fa7ad5266fae4bbb5bff17a8}"
+  _expected_sha256="${NANOMQ_EXPECTED_CA_FINGERPRINT_SHA256:-4D2B8A685F7EDBF1CD8890461DBD6666DCBC1654FA7AD5266FAE4BBB5BFF17A8}"
   _expected_sha1="${NANOMQ_EXPECTED_CA_FINGERPRINT:-9B:12:06:56:04:B4:28:73:C3:CF:1B:36:42:07:9A:CD:53:33:2D:8F}"
-  echo "[nanomq] === EXPECTED FINGERPRINT (from local) ==="
+  echo "[nanomq] === EXPECTED FINGERPRINT (correct Root CA) ==="
   echo "[nanomq] SHA256: ${_expected_sha256}"
   echo "[nanomq] SHA1: ${_expected_sha1}"
 
   _actual_sha256="$(_fp_norm "$_ca_fp_sha256")"
   _actual_sha1="$(_fp_norm "$_ca_fp_sha1")"
-  if [ "$_actual_sha256" != "$(_fp_norm "$_expected_sha256")" ]; then
-    echo "[nanomq] WARN: Root CA SHA256 MISMATCH — Railway NANOMQ_TLS_CA_CERT may be wrong." >&2
-    echo "[nanomq]   actual:   ${_ca_fp_sha256}" >&2
-    echo "[nanomq]   expected: SHA256 Fingerprint=${_expected_sha256}" >&2
+  _norm_expected_sha256="$(_fp_norm "$_expected_sha256")"
+  _norm_expected_sha1="$(_fp_norm "$_expected_sha1")"
+
+  if [ "$_actual_sha256" = "$_norm_expected_sha256" ]; then
+    echo "[nanomq] Root CA SHA256 matches expected (CORRECT)"
   else
-    echo "[nanomq] Root CA SHA256 matches expected OK"
+    echo "[nanomq] ERROR: Root CA SHA256 MISMATCH!" >&2
+    echo "[nanomq]   Expected: ${_norm_expected_sha256}" >&2
+    echo "[nanomq]   Actual:   ${_actual_sha256}" >&2
+    echo "[nanomq]   Check NANOMQ_TLS_CA_CERT on Railway (Variables → Raw editor, full PEM)." >&2
+    if [ "$_strict" = 1 ]; then
+      exit 1
+    fi
   fi
-  if [ "$_actual_sha1" != "$(_fp_norm "$_expected_sha1")" ]; then
-    echo "[nanomq] WARN: Root CA SHA1 MISMATCH — fix NANOMQ_TLS_CA_CERT (Raw editor, full PEM)." >&2
-    echo "[nanomq]   actual:   ${_ca_fp_sha1}" >&2
-    echo "[nanomq]   expected: SHA1 Fingerprint=${_expected_sha1}" >&2
+
+  if [ "$_actual_sha1" = "$_norm_expected_sha1" ]; then
+    echo "[nanomq] Root CA SHA1 matches expected (CORRECT)"
   else
-    echo "[nanomq] Root CA SHA1 matches expected OK"
+    echo "[nanomq] ERROR: Root CA SHA1 MISMATCH!" >&2
+    echo "[nanomq]   Expected: ${_norm_expected_sha1}" >&2
+    echo "[nanomq]   Actual:   ${_actual_sha1}" >&2
+    echo "[nanomq]   The env var likely still contains the old CA — update NANOMQ_TLS_CA_CERT." >&2
+    if [ "$_strict" = 1 ]; then
+      exit 1
+    fi
   fi
 }
 
@@ -190,17 +235,21 @@ if [ -n "${NANOMQ_TLS_CA_CERT:-}" ] || [ -n "${NANOMQ_TLS_CERT:-}" ] || [ -n "${
     echo "[nanomq] ERROR: Partial NANOMQ_TLS_* env — set all three: CA_CERT, CERT, KEY." >&2
     exit 1
   fi
+  log_env_pem_sources
   wipe_cert_dir
+  echo "[nanomq] Removed stale PEMs under $CERT_DIR before env write."
   write_pem_from_env "$NANOMQ_TLS_CA_CERT" "$CERT_DIR/root_ca.crt" 644
   write_pem_from_env "$NANOMQ_TLS_CERT" "$CERT_DIR/broker.crt" 644
   write_pem_from_env "$NANOMQ_TLS_KEY" "$CERT_DIR/broker.key" 600
-  echo "[nanomq] Wrote TLS PEMs from environment (stale files removed, newlines normalized)."
-  log_root_ca_fingerprint
+  echo "[nanomq] Wrote TLS PEMs from environment variables (newlines normalized, stale files removed)."
+  verify_pem_files_written
+  verify_root_ca_fingerprint 1
 elif [ -f "$CERT_DIR/root_ca.crt" ] && [ -f "$CERT_DIR/broker.crt" ] && [ -f "$CERT_DIR/broker.key" ]; then
+  echo "[nanomq] WARN: NANOMQ_TLS_* env not set — using existing files under $CERT_DIR." >&2
+  echo "[nanomq]   On Railway, set NANOMQ_TLS_CA_CERT, NANOMQ_TLS_CERT, NANOMQ_TLS_KEY so stale PEMs are not reused." >&2
   chmod 644 "$CERT_DIR/root_ca.crt" "$CERT_DIR/broker.crt" 2>/dev/null || true
   chmod 600 "$CERT_DIR/broker.key" 2>/dev/null || true
-  echo "[nanomq] Using TLS PEM files mounted under $CERT_DIR (local dev; no NANOMQ_TLS_* env set)."
-  log_root_ca_fingerprint
+  verify_root_ca_fingerprint 0
 else
   echo "[nanomq] ERROR: Missing TLS material." >&2
   echo "  Set NANOMQ_TLS_CA_CERT, NANOMQ_TLS_CERT, NANOMQ_TLS_KEY (full PEM text), or" >&2
