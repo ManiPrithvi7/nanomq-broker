@@ -1,7 +1,7 @@
 #!/bin/sh
 # PEMs always loaded from NANOMQ_TLS_*_BASE64 env on every start — no file fallback.
 # Stale files under /etc/nanomq/certs/ are removed before write.
-# Exits on missing env, failed write, or cert parse error.
+# Exits on missing env, failed write, cert parse error, or chain mismatch.
 # NANOMQ_DISABLE_TLS=1 → plain MQTT on 1883 (staging only).
 set -e
 
@@ -30,13 +30,21 @@ start_broker() {
   exec "$_bin" start --conf "$_conf"
 }
 
-# Decode Base64 to PEM (byte-perfect, no newline mangling)
+# Decode Base64 to PEM, strip carriage returns (mbedTLS requirement)
 write_pem_from_base64() {
   _b64_var="$1"
   _path="$2"
   _mode="$3"
-  echo "$_b64_var" | base64 -d > "$_path"
+  printf '%s' "$_b64_var" | base64 -d | tr -d '\r' > "$_path"
   chmod "$_mode" "$_path"
+}
+
+_hex_dump() {
+  if command -v xxd >/dev/null 2>&1; then
+    xxd
+  else
+    od -An -tx1
+  fi
 }
 
 log_pem_file_encoding() {
@@ -48,6 +56,7 @@ log_pem_file_encoding() {
   echo "[nanomq] $_file char count: $_chars"
   echo "[nanomq] $_file first line: $(head -1 "$_path")"
   echo "[nanomq] $_file last line:  $(tail -1 "$_path")"
+  echo "[nanomq] $_file hex tail:   $(tail -c 20 "$_path" | _hex_dump)"
   if [ "$_lines" -lt 3 ]; then
     echo "[nanomq] ERROR: $_file has less than 3 lines — invalid PEM" >&2
     exit 1
@@ -72,13 +81,13 @@ if [ -z "${NANOMQ_TLS_CA_CERT_BASE64:-}" ] || [ -z "${NANOMQ_TLS_CERT_BASE64:-}"
   exit 1
 fi
 
-# ── Decode Base64 to PEM files ─────────────────────────────────────────────────
+# ── Decode Base64 to PEM files (mbedTLS-safe: strip CR) ────────────────────────
 write_pem_from_base64 "$NANOMQ_TLS_CA_CERT_BASE64" "$CERT_DIR/root_ca.crt" 644
 write_pem_from_base64 "$NANOMQ_TLS_CERT_BASE64"    "$CERT_DIR/broker.crt" 644
 write_pem_from_base64 "$NANOMQ_TLS_KEY_BASE64"     "$CERT_DIR/broker.key" 600
 echo "[nanomq] Decoded TLS PEMs from Base64 environment variables"
 
-# ── PEM encoding diagnostics ─────────────────────────────────────────────────
+# ── PEM encoding diagnostics (written files) ─────────────────────────────────
 log_pem_file_encoding "root_ca.crt"
 log_pem_file_encoding "broker.crt"
 log_pem_file_encoding "broker.key"
@@ -109,11 +118,22 @@ for _pair in "root_ca.crt:Root CA" "broker.crt:Broker cert"; do
   echo "[nanomq] $_label fingerprint: $_fp"
 done
 
-if ! openssl rsa -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null; then
-  echo "[nanomq] ERROR: broker.key is not a valid RSA private key" >&2
+# ── Validate private key (supports both RSA and EC) ───────────────────────────
+if ! openssl pkey -in "$CERT_DIR/broker.key" -check -noout 2>/dev/null; then
+  echo "[nanomq] ERROR: broker.key is not a valid private key (RSA or EC)" >&2
   exit 1
 fi
 echo "[nanomq] broker.key is valid"
+
+# ── Verify private key matches broker cert ────────────────────────────────────
+_cert_pubkey="$(openssl x509 -in "$CERT_DIR/broker.crt" -noout -pubkey 2>/dev/null)"
+_key_pubkey="$(openssl pkey -in "$CERT_DIR/broker.key" -pubout 2>/dev/null)"
+if [ "$_cert_pubkey" != "$_key_pubkey" ]; then
+  echo "[nanomq] FATAL: broker.key does NOT match broker.crt public key" >&2
+  echo "[nanomq]   NANOMQ_TLS_CERT_BASE64 and NANOMQ_TLS_KEY_BASE64 are from different keypairs" >&2
+  exit 1
+fi
+echo "[nanomq] broker.key matches broker.crt"
 
 # ── Verify broker cert is signed by the env-sourced Root CA ───────────────────
 if ! openssl verify -CAfile "$CERT_DIR/root_ca.crt" "$CERT_DIR/broker.crt" >/dev/null 2>&1; then
@@ -122,5 +142,9 @@ if ! openssl verify -CAfile "$CERT_DIR/root_ca.crt" "$CERT_DIR/broker.crt" >/dev
   exit 1
 fi
 echo "[nanomq] broker.crt verified against Root CA from env"
+
+# ── Confirm nanomq.conf TLS paths match where we write ───────────────────────
+echo "[nanomq] nanomq.conf TLS section:"
+grep -A 5 'tls' "$CONF_TLS" 2>/dev/null || echo "[nanomq] (no tls block found — ensure config points to $CERT_DIR)"
 
 start_broker "$CONF_TLS"
