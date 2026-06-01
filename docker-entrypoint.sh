@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-echo "[nanomq] ENTRYPOINT VERSION: 2026-06-01-haproxy-v1"
+echo "[nanomq] ENTRYPOINT VERSION: 2026-06-01-stunnel-v1"
 
 NANOMQ_BIN="${NANOMQ_BIN:-/usr/local/bin/nanomq}"
 CONF_PLAIN="${NANOMQ_PLAIN_CONF:-/etc/nanomq.plain.conf}"
@@ -22,7 +22,7 @@ done
 # ── TLS disabled: plain mode ──
 case "${NANOMQ_DISABLE_TLS:-}" in
   1|true|TRUE|yes|YES)
-    echo "[nanomq] Plain MQTT mode (no HAProxy)"
+    echo "[nanomq] Plain MQTT mode"
     exec "$NANOMQ_BIN" start --conf "$CONF_PLAIN"
     ;;
 esac
@@ -53,30 +53,18 @@ done
 openssl pkey -in "$CERT_DIR/broker.key" -check -noout >/dev/null 2>&1 || {
   echo "[nanomq] ERROR: broker.key invalid" >&2; exit 1; }
 
-# ── Create HAProxy combined PEM (cert + key) ──
-cat "$CERT_DIR/broker.crt" "$CERT_DIR/broker.key" > "$CERT_DIR/broker.pem"
-chmod 600 "$CERT_DIR/broker.pem"
-
-# ── Verify HAProxy config ──
-echo "[nanomq] Checking HAProxy config..."
-haproxy -c -f /etc/haproxy/haproxy.cfg || {
-  echo "[nanomq] ERROR: HAProxy config invalid" >&2
-  exit 1
-}
-
 # ── Start NanoMQ in background ──
 echo "[nanomq] Starting NanoMQ on plain TCP 1883..."
 "$NANOMQ_BIN" start --conf "$CONF_TLS" &
 NANOMQ_PID=$!
 
-# Wait for NanoMQ to be ready
 sleep 3
 if ! kill -0 $NANOMQ_PID 2>/dev/null; then
   echo "[nanomq] ERROR: NanoMQ failed to start" >&2
   exit 1
 fi
 
-# ── Start HAProxy in foreground ──
-echo "[nanomq] Starting HAProxy on mTLS 8883..."
+# ── Start stunnel in foreground ──
+echo "[nanomq] Starting stunnel on mTLS 8883..."
 echo "[nanomq] CA fingerprint: $(openssl x509 -in $CERT_DIR/root_ca.crt -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':')"
-exec haproxy -f /etc/haproxy/haproxy.cfg
+exec stunnel /etc/stunnel/stunnel.conf
