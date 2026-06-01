@@ -39,15 +39,32 @@ write_pem_from_env() {
   chmod "$_mode" "$_path"
 }
 
-log_pem_encoding() {
+_hex_dump() {
+  if command -v xxd >/dev/null 2>&1; then
+    xxd
+  else
+    od -An -tx1
+  fi
+}
+
+log_ca_env_encoding() {
+  _env_len="$(printf '%s' "$NANOMQ_TLS_CA_CERT" | wc -c | tr -d ' ')"
+  echo "[nanomq] NANOMQ_TLS_CA_CERT env byte count: $_env_len"
+  echo "[nanomq] CA env first 200 bytes hex: $(printf '%s' "$NANOMQ_TLS_CA_CERT" | head -c 200 | _hex_dump)"
+}
+
+log_pem_file_encoding() {
   _file="$1"
-  _label="$2"
-  _lines="$(wc -l < "$CERT_DIR/$_file" | tr -d ' ')"
-  echo "[nanomq] $_label line count: $_lines"
-  echo "[nanomq] $_label first line: $(head -1 "$CERT_DIR/$_file")"
-  echo "[nanomq] $_label last line:  $(tail -1 "$CERT_DIR/$_file")"
+  _path="$CERT_DIR/$_file"
+  _lines="$(wc -l < "$_path" | tr -d ' ')"
+  _chars="$(wc -c < "$_path" | tr -d ' ')"
+  echo "[nanomq] $_file line count: $_lines"
+  echo "[nanomq] $_file char count: $_chars"
+  echo "[nanomq] $_file first line: $(head -1 "$_path")"
+  echo "[nanomq] $_file last line:  $(tail -1 "$_path")"
+  echo "[nanomq] $_file hex tail:   $(tail -c 20 "$_path" | _hex_dump)"
   if [ "$_lines" -lt 3 ]; then
-    echo "[nanomq] ERROR: $_label looks like a single-line PEM — newline substitution failed." >&2
+    echo "[nanomq] ERROR: $_file looks like a single-line PEM — newline substitution failed." >&2
     echo "[nanomq]   Use Railway Variables → Raw editor with real line breaks, or literal \\n sequences." >&2
     exit 1
   fi
@@ -71,15 +88,19 @@ if [ -z "${NANOMQ_TLS_CA_CERT:-}" ] || [ -z "${NANOMQ_TLS_CERT:-}" ] || [ -z "${
   exit 1
 fi
 
+# ── Env encoding (before write — raw bytes from Railway) ───────────────────────
+log_ca_env_encoding
+
 # ── Write PEMs from env (mbedTLS-safe: expand \\n, strip CR, trailing newline) ─
 write_pem_from_env "$NANOMQ_TLS_CA_CERT" "$CERT_DIR/root_ca.crt" 644
 write_pem_from_env "$NANOMQ_TLS_CERT"    "$CERT_DIR/broker.crt" 644
 write_pem_from_env "$NANOMQ_TLS_KEY"     "$CERT_DIR/broker.key" 600
 echo "[nanomq] Wrote TLS PEMs from environment variables"
 
-log_pem_encoding "root_ca.crt" "root_ca.crt"
-log_pem_encoding "broker.crt"  "broker.crt"
-log_pem_encoding "broker.key"   "broker.key"
+# ── PEM encoding diagnostics (written files) ─────────────────────────────────
+log_pem_file_encoding "root_ca.crt"
+log_pem_file_encoding "broker.crt"
+log_pem_file_encoding "broker.key"
 
 # ── Verify files are non-empty ─────────────────────────────────────────────────
 for _f in root_ca.crt broker.crt broker.key; do
