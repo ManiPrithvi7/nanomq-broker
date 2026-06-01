@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-echo "[nanomq] ENTRYPOINT VERSION: 2026-06-01-stunnel-v1"
+echo "[nanomq] ENTRYPOINT VERSION: 2026-06-01-stunnel-v2"
 
 NANOMQ_BIN="${NANOMQ_BIN:-/usr/local/bin/nanomq}"
 CONF_PLAIN="${NANOMQ_PLAIN_CONF:-/etc/nanomq.plain.conf}"
@@ -9,7 +9,9 @@ CONF_TLS="${NANOMQ_TLS_CONF:-/etc/nanomq.conf}"
 CERT_DIR="/etc/nanomq/certs"
 
 mkdir -p "$CERT_DIR"
-[ -z "${NANOMQ_CONF_PATH:-}" ] && unset NANOMQ_CONF_PATH
+
+# CRITICAL: Set config path explicitly for NanoMQ
+export NANOMQ_CONF_PATH="$CONF_TLS"
 
 # Kill base-image nanomq
 for _i in 1 2 3; do
@@ -23,6 +25,7 @@ done
 case "${NANOMQ_DISABLE_TLS:-}" in
   1|true|TRUE|yes|YES)
     echo "[nanomq] Plain MQTT mode"
+    export NANOMQ_CONF_PATH="$CONF_PLAIN"
     exec "$NANOMQ_BIN" start --conf "$CONF_PLAIN"
     ;;
 esac
@@ -54,8 +57,8 @@ openssl pkey -in "$CERT_DIR/broker.key" -check -noout >/dev/null 2>&1 || {
   echo "[nanomq] ERROR: broker.key invalid" >&2; exit 1; }
 
 # ── Start NanoMQ in background ──
-echo "[nanomq] Starting NanoMQ on plain TCP 1883..."
-"$NANOMQ_BIN" start --conf "$CONF_TLS" &
+echo "[nanomq] Starting NanoMQ with config: $NANOMQ_CONF_PATH"
+"$NANOMQ_BIN" start --conf "$NANOMQ_CONF_PATH" &
 NANOMQ_PID=$!
 
 sleep 3

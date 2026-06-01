@@ -10,6 +10,7 @@ RUN rm -rf /etc/nanomq/certs/* 2>/dev/null || true \
  && rm -f /etc/cont-init.d/* 2>/dev/null || true
 
 COPY nanomq.conf /etc/nanomq.conf
+RUN test -s /etc/nanomq.conf && grep -q '0.0.0.0:1883' /etc/nanomq.conf
 COPY nanomq.plain.conf /etc/nanomq.plain.conf
 COPY stunnel.conf /etc/stunnel/stunnel.conf
 COPY docker-entrypoint.sh /docker-entrypoint.sh
