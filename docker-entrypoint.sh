@@ -30,6 +30,29 @@ start_broker() {
   exec "$_bin" start --conf "$_conf"
 }
 
+# Railway may store PEMs as one line with literal \n and/or CRLF — mbedTLS needs real LF + headers.
+write_pem_from_env() {
+  _var="$1"
+  _path="$2"
+  _mode="$3"
+  printf '%s\n' "$_var" | sed 's/\\n/\n/g' | tr -d '\r' > "$_path"
+  chmod "$_mode" "$_path"
+}
+
+log_pem_encoding() {
+  _file="$1"
+  _label="$2"
+  _lines="$(wc -l < "$CERT_DIR/$_file" | tr -d ' ')"
+  echo "[nanomq] $_label line count: $_lines"
+  echo "[nanomq] $_label first line: $(head -1 "$CERT_DIR/$_file")"
+  echo "[nanomq] $_label last line:  $(tail -1 "$CERT_DIR/$_file")"
+  if [ "$_lines" -lt 3 ]; then
+    echo "[nanomq] ERROR: $_label looks like a single-line PEM — newline substitution failed." >&2
+    echo "[nanomq]   Use Railway Variables → Raw editor with real line breaks, or literal \\n sequences." >&2
+    exit 1
+  fi
+}
+
 # ── TLS disabled branch ────────────────────────────────────────────────────────
 case "${NANOMQ_DISABLE_TLS:-}" in
   1|true|TRUE|yes|YES)
@@ -48,14 +71,15 @@ if [ -z "${NANOMQ_TLS_CA_CERT:-}" ] || [ -z "${NANOMQ_TLS_CERT:-}" ] || [ -z "${
   exit 1
 fi
 
-# ── Write PEMs from env ────────────────────────────────────────────────────────
-printf '%s' "$NANOMQ_TLS_CA_CERT" | sed 's/\\n/\n/g' > "$CERT_DIR/root_ca.crt"
-chmod 644 "$CERT_DIR/root_ca.crt"
-printf '%s' "$NANOMQ_TLS_CERT"    | sed 's/\\n/\n/g' > "$CERT_DIR/broker.crt"
-chmod 644 "$CERT_DIR/broker.crt"
-printf '%s' "$NANOMQ_TLS_KEY"     | sed 's/\\n/\n/g' > "$CERT_DIR/broker.key"
-chmod 600 "$CERT_DIR/broker.key"
+# ── Write PEMs from env (mbedTLS-safe: expand \\n, strip CR, trailing newline) ─
+write_pem_from_env "$NANOMQ_TLS_CA_CERT" "$CERT_DIR/root_ca.crt" 644
+write_pem_from_env "$NANOMQ_TLS_CERT"    "$CERT_DIR/broker.crt" 644
+write_pem_from_env "$NANOMQ_TLS_KEY"     "$CERT_DIR/broker.key" 600
 echo "[nanomq] Wrote TLS PEMs from environment variables"
+
+log_pem_encoding "root_ca.crt" "root_ca.crt"
+log_pem_encoding "broker.crt"  "broker.crt"
+log_pem_encoding "broker.key"   "broker.key"
 
 # ── Verify files are non-empty ─────────────────────────────────────────────────
 for _f in root_ca.crt broker.crt broker.key; do
