@@ -10,7 +10,7 @@ MQTT broker only, decoupled from **mqtt-publisher-lite**. Deploy this folder as 
 | `caddy-proxy/` | Caddy L4 TCP passthrough — public edge for `broker.withproof.io:8883` |
 | `generate-broker-cert-openssl.sh` | Issue `certs/broker.{crt,key}` from shared Root CA (`BROKER_SAN_DNS`, optional legacy `BROKER_RAILWAY_PROXY_HOST`) |
 | `print-railway-broker-env.sh` | Print raw PEM blocks for Railway `NANOMQ_TLS_*` variables |
-| `nanomq.conf` | mTLS listener on **8883** |
+| `nanomq.conf` | mTLS listener on **8883**, `verify_peer` + `fail_if_no_peer_cert` |
 | `nanomq.plain.conf` | Plain MQTT **1883** (staging only) |
 | `docker-entrypoint.sh` | Writes PEMs from `NANOMQ_TLS_*` or uses mounted `/etc/nanomq/certs/` |
 | `railway.toml` / `railway.json` | Railway config-as-code |
@@ -105,10 +105,14 @@ Connection **without** `-cert` / `-key` should fail (mTLS enforced).
 
 Point the app at the public Caddy endpoint (not the broker internal hostname):
 
-- `MQTT_BROKER=broker.withproof.io`
-- `MQTT_PORT=8883`
+Set (names match `src/config/index.ts`):
+
+- `MQTT_BROKER=broker.withproof.io` — hostname only (no `mqtts://` prefix in env; TLS is toggled separately)
+- `MQTT_PORT=8883` — external TCP port mapped to **8883**
 - `MQTT_TLS_ENABLED=true` (or `MQTT_TLS=true`)
-- `MQTT_TLS_CA_BASE64` / `MQTT_TLS_CLIENT_CERT_BASE64` / `MQTT_TLS_CLIENT_KEY_BASE64` — PEM material (same Root CA as broker/devices)
+- `MQTT_TLS_CA_PATH` — trust store for broker + chain (same Root CA)
+- `MQTT_TLS_CLIENT_CERT_PATH` / `MQTT_TLS_CLIENT_KEY_PATH` — **backend’s** MQTT client cert/key (issued by same CA as devices)
+- `MQTT_TLS_SERVERNAME` — if the TCP hostname does not match the CN/SAN on `broker.crt`
 
 Issue a **dedicated** server client cert (do not reuse a device identity).
 
