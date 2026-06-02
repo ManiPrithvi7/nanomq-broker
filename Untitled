@@ -1,3 +1,0 @@
-openssl s_client -connect yamabiko.proxy.rlwy.net:43439 -servername yamabiko.proxy.rlwy.net \
-  -CAfile ../statsmqtt/data/ca/root-ca.crt \
-  -cert /path/to/client.crt -key /path/to/client.key

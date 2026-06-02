@@ -1,237 +1,109 @@
-# NanoMQ broker (standalone)
+# NanoMQ broker — OCI (standalone)
 
-MQTT broker only, decoupled from **mqtt-publisher-lite**. Deploy this folder as **its own** Railway service (or any Docker host). Devices and the Node backend use the **same public broker URL** and **the same PKI Root CA**; each client (server + devices) uses its **own** client certificate signed by that CA.
+Native **NanoMQ 0.24.13** on Oracle Cloud with **mTLS on 8883**. Plain MQTT listens on **127.0.0.1:1883** only (not exposed in the VCN).
+
+PKI is managed in **[proofmqtt](../proofmqtt)** (`data/ca/`, `broker/certs/`). This repo contains deploy scripts and `nanomq.conf` only.
 
 ## Layout
 
 | File | Purpose |
 |------|---------|
-| `Dockerfile` | NanoMQ image; build context = **this directory** |
-| `caddy-proxy/` | Caddy L4 TCP passthrough — public edge for `broker.withproof.io:8883` |
-| `generate-broker-cert-openssl.sh` | Issue `certs/broker.{crt,key}` from shared Root CA (`BROKER_SAN_DNS`, optional legacy `BROKER_RAILWAY_PROXY_HOST`) |
-| `print-railway-broker-env.sh` | Print raw PEM blocks for Railway `NANOMQ_TLS_*` variables |
-| `nanomq.conf` | Native mTLS on **8883** (OCI); same file for TLS listener settings |
-| `nanomq.plain.conf` | Plain MQTT **1883** (staging only) |
-| `docker-entrypoint.sh` | Writes PEMs from `NANOMQ_TLS_*` or uses mounted `/etc/nanomq/certs/` |
-| `railway.toml` / `railway.json` | Railway config-as-code |
-| `env.railway.example` | Variable template |
-| `docker-compose.yml` | Local stack: broker + Caddy on host `:8883` |
-| `.env.compose.example` | Optional compose overrides (Root CA path, debug) |
-| `setup-broker.sh` | Oracle Linux VM: install NanoMQ **0.24.13**, native mTLS config, systemd |
-| `deploy-certs.sh` | Copy PROOF-CA PEMs to VM (`tr -d '\r'`), restart `nanomq` |
-| `deploy-oci.sh` | OCI CLI: discover VM, open VCN **8883**, run setup + certs |
-| `deploy-oci.env.example` | Template for `OCI_COMPARTMENT_ID` / `OCI_INSTANCE_NAME` |
+| `nanomq.conf` | Native SSL :8883, localhost :1883, mTLS `verify_peer` |
+| `setup-broker.sh` | Install NanoMQ 0.24.13 (apt/deb or dnf/rpm), systemd, host firewall :8883 |
+| `deploy-certs.sh` | SCP PROOF-CA + broker leaf to VM, restart `nanomq` |
+| `deploy-oci.sh` | OCI CLI: network, SSH bootstrap, setup + certs |
+| `deploy-oci.env` | Instance OCID, IP, SSH key, `CA_DIR` (local; gitignored pattern via `.env`) |
+| `deploy-oci.env.example` | Template |
+| `.cursor/skills/oci-nanomq-deploy/` | Agent skill for OCI deploy troubleshooting |
 
-## OCI VPS deploy (native mTLS, no stunnel)
+## Prerequisites
 
-Production on Oracle Cloud uses **NanoMQ native `listeners.ssl`** on `0.0.0.0:8883`. Plain MQTT stays on **`127.0.0.1:1883`** (not exposed in the VCN). Same PROOF-CA and `certs/broker.{crt,key}` as Railway — no new CA.
+- OCI CLI (`oci`) — `oci session authenticate --profile-name DEFAULT`
+- `jq` (security-list updates)
+- SSH key matching instance launch pubkey (`OCI_SSH_KEY`)
+- **Ubuntu 24.04+** or **Oracle Linux 9** (NanoMQ 0.24.13 needs GLIBC ≥ 2.36)
+- proofmqtt PKI: `root-ca-nanomq.crt`, `broker/certs/broker.{crt,key}`
 
-Docker/Railway in this repo may still use **stunnel** via [`docker-entrypoint.sh`](docker-entrypoint.sh); that path is unchanged.
-
-### Prerequisites
-
-- OCI CLI (`oci`) authenticated: `oci session authenticate --profile-name DEFAULT`
-- `jq` on your laptop (security-list updates)
-- SSH key at `~/.ssh/oci_nanomq_key` (or set `OCI_SSH_KEY`) — **must be in the instance `ssh_authorized_keys` at launch** (OCI cannot add it after boot via API)
-- Root CA at `../statsmqtt/data/ca/root-ca.crt` and broker certs in `./certs/`
-- VCN route `0.0.0.0/0` → Internet Gateway (`deploy-oci.sh` can create this via `OCI_ENSURE_IGW_ROUTE=1`)
-
-**Proof instance defaults** (see [`deploy-oci.env`](deploy-oci.env)): display name `Proof`, shape `VM.Standard.E2.1.Micro` (x86_64 RPM), tenancy compartment OCID.
-
-### One-shot deploy
+## One-shot deploy
 
 ```bash
-export OCI_CLI_PROFILE=DEFAULT
-export OCI_COMPARTMENT_ID="ocid1.compartment.oc1..xxxx"
-export OCI_INSTANCE_NAME="your-vm-display-name"
+cp deploy-oci.env.example deploy-oci.env   # edit OCID, IP, SSH key
 ./deploy-oci.sh
 ```
 
 `deploy-oci.sh` will:
 
-1. Find the RUNNING instance by display name
-2. Idempotently add VCN ingress **TCP 8883** (backs up security list JSON under `/tmp/`)
-3. `scp` `setup-broker.sh` + [`nanomq.conf`](nanomq.conf), run setup on the VM
-4. Run [`deploy-certs.sh`](deploy-certs.sh) (CRLF-safe PEMs, `systemctl restart nanomq`)
+1. Resolve the VM (by `OCI_INSTANCE_ID` or `OCI_INSTANCE_NAME`)
+2. Ensure IGW route and ingress **TCP 22** + **8883**
+3. Run `setup-broker.sh` on the VM
+4. Run `deploy-certs.sh` with `CA_DIR` and `BROKER_CERT_DIR` from env
 
-Set `SKIP_NETWORK=1` to skip the security-list step (use after the first successful network pass).
+Set `SKIP_NETWORK=1` after the first successful network pass.
 
-**Port 22 vs SSH auth:** `deploy-oci.sh` ensures ingress **TCP 22** and **8883** on the instance security list. If `nc -zv $OCI_PUBLIC_IP 22` succeeds but `ssh` says `Permission denied (publickey)`, the network is fine — add `~/.ssh/oci_nanomq_key.pub` to `/home/opc/.ssh/authorized_keys` via **OCI Console → Proof → Console connection** (serial), then re-run `SKIP_NETWORK=1 ./deploy-oci.sh`.
-
-Optional: set `OCI_SSH_INGRESS_CIDR` in `deploy-oci.env` to your office IP `/32` instead of `0.0.0.0/0` for SSH.
-
-### Manual steps
+### Environment (`deploy-oci.env`)
 
 ```bash
-scp -i ~/.ssh/oci_nanomq_key setup-broker.sh nanomq.conf opc@<public-ip>:/tmp/
-ssh -i ~/.ssh/oci_nanomq_key opc@<public-ip> 'sudo bash /tmp/setup-broker.sh'
-./deploy-certs.sh opc@<public-ip>
+export OCI_COMPARTMENT_ID="ocid1.tenancy.oc1..xxxx"
+export OCI_INSTANCE_NAME="Proof-v3"
+export OCI_INSTANCE_ID="ocid1.instance...."   # optional if name is unique
+export OCI_PUBLIC_IP="x.x.x.x"                # optional; auto-discovered
+export OCI_SSH_KEY="${HOME}/Downloads/ssh-key-2026-06-02.key"
+export OCI_SSH_USER=ubuntu                    # opc on Oracle Linux
+export CA_DIR="${HOME}/Desktop/proofmqtt/data/ca"
+export BROKER_CERT_DIR="${HOME}/Desktop/proofmqtt/broker/certs"
 ```
 
-Point **DNS** `broker.withproof.io` → instance public IP. Open **8883** only in the security list (not 1883).
+## Manual deploy
 
-### NanoMQ version and packages
+```bash
+scp -i "$OCI_SSH_KEY" setup-broker.sh nanomq.conf ubuntu@<ip>:/tmp/
+ssh -i "$OCI_SSH_KEY" ubuntu@<ip> 'sudo bash /tmp/setup-broker.sh'
 
-Pinned to **[0.24.13](https://github.com/nanomq/nanomq/releases/tag/0.24.13)**. [`setup-broker.sh`](setup-broker.sh) installs the arch-matching **RPM**, then falls back to extracting the **`.deb`**:
+CA_DIR=~/Desktop/proofmqtt/data/ca \
+  SSH_KEY=~/Downloads/ssh-key-2026-06-02.key \
+  ./deploy-certs.sh ubuntu@<ip> ~/Desktop/proofmqtt/broker/certs
+```
+
+Point **DNS** `broker.withproof.io` → instance public IP.
+
+## NanoMQ packages (0.24.13)
 
 | VM arch | RPM | `.deb` fallback |
 |---------|-----|-----------------|
 | `aarch64` | `linux-arm64.rpm` | `linux-arm64.deb` |
 | `x86_64` | `linux-x86_64.rpm` | `linux-amd64.deb` |
 
-### Config bind syntax
-
-OCI [`nanomq.conf`](nanomq.conf) uses URI binds (`tls+nmq-tcp://0.0.0.0:8883`, `nmq-tcp://127.0.0.1:1883`). Official docs also allow `host:port` without a scheme — if `:8883` does not listen after deploy, switch binds to `0.0.0.0:8883` / `127.0.0.1:1883` and restart `nanomq`.
-
-### Verification
+## Verification
 
 ```bash
-sudo systemctl status nanomq
-sudo ss -tlnp | grep -E '1883|8883'
-sudo journalctl -u nanomq -n 50   # expect tls url on :8883
+ssh -i "$OCI_SSH_KEY" ubuntu@<ip> 'sudo systemctl status nanomq; sudo ss -tlnp | grep -E "1883|8883"'
 
-openssl s_client -connect broker.withproof.io:8883 -servername broker.withproof.io \
-  -CAfile ../statsmqtt/data/ca/root-ca.crt \
-  -cert /path/to/client.crt -key /path/to/client.key
+CA=~/Desktop/proofmqtt/data/ca/root-ca-nanomq.crt
+CLIENT=~/Desktop/proofmqtt/data/mqtt-client
+
+openssl s_client -connect <ip>:8883 -servername broker.withproof.io \
+  -CAfile "$CA" -cert "$CLIENT/client.crt" -key "$CLIENT/client.key"
+# Expect: Verify return code: 0 (ok)
+
+mosquitto_pub -h <ip> -p 8883 --cafile "$CA" \
+  --cert "$CLIENT/client.crt" --key "$CLIENT/client.key" \
+  -t "test/hello" -m "ok"
 ```
 
-If mbedTLS reports **-9568**, re-run `deploy-certs.sh` (CRLF sanitization) and restart `nanomq`.
+### mbedTLS `-9568` on CA
 
-## Migrate from Railway Compose (one service) to two services
-
-If you currently run **both** NanoMQ and Caddy via [`docker-compose.yml`](docker-compose.yml) in a **single** Railway service, migrate as follows. Do **not** convert the bundled Compose service in place — create **new** services.
-
-| Phase | Action |
-|-------|--------|
-| **0** | Push repo with production mTLS (`verify_peer = true` in [`nanomq.conf`](nanomq.conf)). |
-| **1** | **New broker service** (e.g. `nanomq-broker-private`): Root Directory `.`, Dockerfile deploy, copy `NANOMQ_TLS_*` from old Compose service, **no** public TCP proxy or custom domain. Verify logs: `tls url: tls+nmq-tcp://0.0.0.0:8883`. |
-| **2** | **New Caddy service** (`caddy-proxy`): Root Directory `caddy-proxy`, vars from [`caddy-proxy/env.railway.example`](caddy-proxy/env.railway.example), custom domain `broker.withproof.io:8883`. |
-| **3** | On **old Compose service**, remove custom domain and TCP proxy (avoid split-brain). CNAME `broker.withproof.io` → Caddy Railway domain. Run smoke test below. |
-| **4** | **Delete** old Compose service after tests pass. |
-| **5** | Set Caddy `DEBUG` → `INFO` in [`caddy-proxy/Caddyfile`](caddy-proxy/Caddyfile), redeploy. Update mqtt-publisher-lite and devices. |
-
-Keep the old Compose service running (without public domain) until Phase 4 for rollback.
-
-## Architecture (production)
-
-Public clients connect to **`broker.withproof.io:8883`**. A separate **Caddy L4 proxy** service forwards raw TCP over Railway private networking to the private broker. Caddy does **not** terminate TLS; NanoMQ handles mTLS end-to-end.
-
-```
-Client → broker.withproof.io:8883 → caddy-proxy → nanomq-broker-private.railway.internal:8883 → NanoMQ
-```
-
-See [`caddy-proxy/README.md`](caddy-proxy/README.md) for Caddy deploy steps.
-
-## Railway — broker service (e.g. `nanomq-broker-private`)
-
-1. **New service** → same GitHub repo (do not reuse the bundled Compose service).
-2. **Settings → Root Directory:** `.` (repo root — folder containing this `Dockerfile`)
-3. **Settings → Deploy:** **Dockerfile** only — **not** Compose.
-4. **Config-as-code:** use this folder’s `railway.toml` (default).
-5. **Variables:** see `env.railway.example` (production: three `NANOMQ_TLS_*` PEMs; no `NANOMQ_DISABLE_TLS`).
-6. **Networking:** **no public TCP proxy** and **no custom domain** — private network only. Public access is via `caddy-proxy`.
-
-### PEMs in Railway (newlines)
-
-- Prefer **Variables → Raw editor** (`</>`) and paste PEMs with **real line breaks** (`-----BEGIN` on its own line).
-- If the UI stores PEMs as **one line** with literal `\n` sequences, `docker-entrypoint.sh` normalizes them with `sed 's/\\n/\n/g'` before NanoMQ reads the files.
-
-### One-off PEM validation in logs
-
-Set **`NANOMQ_DEBUG_CERTS=1`** on the broker service (then redeploy). On startup the entrypoint logs PEM SHA256 sums, **CA SHA1/SHA256 fingerprints**, SAN list, chain verify, and cert/key modulus match. Debug mode also sets **`NANOMQ_LOG_LEVEL=info`** so logs show `tls url: tls+nmq-tcp://0.0.0.0:8883`. Remove after debugging.
-
-Set **`NANOMQ_EXPECTED_CA_FINGERPRINT`** to your Root CA SHA1 (e.g. `9B:12:06:56:04:B4:28:73:C3:CF:1B:36:42:07:9A:CD:53:33:2D:8F`) to get an explicit **MISMATCH** warning if Railway has the wrong `NANOMQ_TLS_CA_CERT`.
-
-A **`Serving HTTP Server on http://(null):8081`** WARN is normal on NanoMQ 0.24 even when only TLS MQTT is used — look for **`tls url: tls+nmq-tcp://0.0.0.0:8883`** at info level instead.
-
-**Update stale Railway PEMs** after regenerating certs locally:
+NanoMQ may reject CAService-generated `root-ca.crt`. Re-sign with OpenSSL (same key):
 
 ```bash
-./generate-broker-cert-openssl.sh
-./print-railway-broker-env.sh   # paste all three blocks into Railway Raw editor
+cd ~/Desktop/proofmqtt/data/ca
+openssl x509 -in root-ca.crt -signkey root-ca.key -sha256 -days 3650 -out root-ca-nanomq.crt
 ```
 
-### Broker certificate SANs
+Redeploy certs and restart `nanomq`.
 
-Clients validate the server cert against the **hostname they connect to**. Production clients use **`broker.withproof.io`** (included by default in `./generate-broker-cert-openssl.sh`).
+## mqtt-publisher-lite / devices
 
-```bash
-./generate-broker-cert-openssl.sh
-./print-railway-broker-env.sh   # paste into Railway Variables → Raw editor
-```
-
-Optional legacy SAN for old Railway TCP proxy hostnames:
-
-```bash
-BROKER_RAILWAY_PROXY_HOST=yamabiko.proxy.rlwy.net ./generate-broker-cert-openssl.sh
-```
-
-Regenerate and update **`NANOMQ_TLS_CERT`** + **`NANOMQ_TLS_KEY`** on Railway after any cert change. **`NANOMQ_TLS_CA_CERT`** stays the same unless you rotate the Root CA.
-
-### External mTLS smoke test
-
-After Caddy proxy and DNS are configured (all clients must present valid client certs — `verify_peer = true` in [`nanomq.conf`](nanomq.conf)):
-
-```bash
-openssl s_client -connect broker.withproof.io:8883 -servername broker.withproof.io \
-  -CAfile ../statsmqtt/data/ca/root-ca.crt \
-  -cert /path/to/client.crt -key /path/to/client.key
-```
-
-Connection **without** `-cert` / `-key` should fail (mTLS enforced).
-
-## mqtt-publisher-lite (separate service)
-
-Point the app at the public Caddy endpoint (not the broker internal hostname):
-
-Set (names match `src/config/index.ts`):
-
-- `MQTT_BROKER=broker.withproof.io` — hostname only (no `mqtts://` prefix in env; TLS is toggled separately)
-- `MQTT_PORT=8883` — external TCP port mapped to **8883**
-- `MQTT_TLS_ENABLED=true` (or `MQTT_TLS=true`)
-- `MQTT_TLS_CA_PATH` — trust store for broker + chain (same Root CA)
-- `MQTT_TLS_CLIENT_CERT_PATH` / `MQTT_TLS_CLIENT_KEY_PATH` — **backend’s** MQTT client cert/key (issued by same CA as devices)
-- `MQTT_TLS_SERVERNAME` — if the TCP hostname does not match the CN/SAN on `broker.crt`
-
-Issue a **dedicated** server client cert (do not reuse a device identity).
-
-## Local build
-
-```bash
-docker build -t proof-nanomq .
-docker build -t proof-caddy-proxy ./caddy-proxy
-```
-
-### Local stack (docker compose)
-
-Run broker + Caddy together on a shared Docker network. Only **Caddy** binds host port **8883**; the broker is reachable as `nanomq-broker` inside the compose network.
-
-**Prerequisites (fresh clone):** Compose volume mounts expect these host paths to exist before `docker compose up`:
-
-- `./certs/broker.crt` and `./certs/broker.key` — run `./generate-broker-cert-openssl.sh` from the repo root (requires Root CA at `../statsmqtt/data/ca/root-ca.{crt,key}` by default).
-- Root CA for the broker container — default mount is `../statsmqtt/data/ca/root-ca.crt`. Override in `.env` with `ROOT_CA_CRT`, or copy the CA into the repo, e.g. `cp ../statsmqtt/data/ca/root-ca.crt ./certs/root-ca.crt` and set `ROOT_CA_CRT=./certs/root-ca.crt`.
-
-```bash
-./generate-broker-cert-openssl.sh          # creates ./certs/broker.{crt,key}
-cp .env.compose.example .env               # optional; set ROOT_CA_CRT if CA path differs
-docker compose up --build
-```
-
-Test through the proxy:
-
-```bash
-openssl s_client -connect localhost:8883 -servername broker.withproof.io \
-  -CAfile ../statsmqtt/data/ca/root-ca.crt \
-  -cert /path/to/client.crt -key /path/to/client.key
-```
-
-PEM options for the broker container:
-
-- **Volume mounts (default):** `./certs/broker.{crt,key}` plus `ROOT_CA_CRT` (default `../statsmqtt/data/ca/root-ca.crt`) — no entrypoint changes.
-- **Environment variables:** paste `print-railway-broker-env.sh` output into `.env` as `NANOMQ_TLS_*`; entrypoint uses env when all three are set.
-
-Railway production uses **two separate Dockerfile services** (private broker + public Caddy). [`docker-compose.yml`](docker-compose.yml) is **local validation only** — do not deploy it as a single Railway Compose service.
-
-## Legacy `broker/` in monorepo
-
-The older `broker/` path (repo-root Docker context) remains for local smoke tests and docs; **new Railway broker deploys should use this project.**
+- `MQTT_BROKER=broker.withproof.io`
+- `MQTT_PORT=8883`
+- Trust anchor: proofmqtt `root-ca-nanomq.crt` (or current PROOF-CA)
+- Per-client cert/key from your provisioning flow (same CA)

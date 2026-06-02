@@ -22,8 +22,9 @@ SKIP_NETWORK="${SKIP_NETWORK:-}"
 OCI_ASSIGN_PUBLIC_IP="${OCI_ASSIGN_PUBLIC_IP:-}"
 OCI_ENSURE_IGW_ROUTE="${OCI_ENSURE_IGW_ROUTE:-1}"
 OCI_PUBLIC_IP="${OCI_PUBLIC_IP:-}"
-CA_DIR="${CA_DIR:-${HERE}/../statsmqtt/data/ca}"
-export CA_DIR
+CA_DIR="${CA_DIR:-${HERE}/../proofmqtt/data/ca}"
+BROKER_CERT_DIR="${BROKER_CERT_DIR:-${HERE}/../proofmqtt/broker/certs}"
+export CA_DIR BROKER_CERT_DIR
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -237,8 +238,9 @@ scp "${SCP_OPTS[@]}" setup-broker.sh nanomq.conf "$REMOTE:/tmp/"
 echo "=== Running setup-broker.sh on VM ==="
 ssh "${SSH_OPTS[@]}" "$REMOTE" 'sudo bash /tmp/setup-broker.sh'
 
-echo "=== Deploying certs (CA_DIR=$CA_DIR) ==="
-SSH_KEY="$OCI_SSH_KEY" CA_DIR="$CA_DIR" ./deploy-certs.sh "$REMOTE"
+echo "=== Deploying certs (CA_DIR=$CA_DIR, BROKER_CERT_DIR=$BROKER_CERT_DIR) ==="
+SSH_KEY="$OCI_SSH_KEY" CA_DIR="$CA_DIR" BROKER_CERT_DIR="$BROKER_CERT_DIR" \
+  ./deploy-certs.sh "$REMOTE" "$BROKER_CERT_DIR"
 
 echo ""
 echo "=== Deploy complete ==="
@@ -247,5 +249,6 @@ echo "  mTLS:     ${PUBLIC_IP}:8883"
 echo "  SSH:      ssh ${SSH_OPTS[*]} $REMOTE"
 echo ""
 echo "Smoke test:"
+echo "  CA=\$CA_DIR/root-ca-nanomq.crt CLIENT=../proofmqtt/data/mqtt-client"
 echo "  openssl s_client -connect ${PUBLIC_IP}:8883 -servername broker.withproof.io \\"
-echo "    -CAfile ../statsmqtt/data/ca/root-ca.crt -cert <client.crt> -key <client.key>"
+echo "    -CAfile \$CA -cert \$CLIENT/client.crt -key \$CLIENT/client.key"

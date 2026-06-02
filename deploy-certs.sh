@@ -4,11 +4,12 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OCI_HOST="${1:-ubuntu@broker.withproof.io}"
-CERT_DIR="${2:-${HERE}/certs}"
-CA_DIR="${CA_DIR:-${3:-${HERE}/certs}}"
+DEFAULT_BROKER_CERTS="${HERE}/../proofmqtt/broker/certs"
+CERT_DIR="${2:-${BROKER_CERT_DIR:-$DEFAULT_BROKER_CERTS}}"
+CA_DIR="${CA_DIR:-${3:-${HERE}/../proofmqtt/data/ca}}"
 SSH_KEY="${SSH_KEY:-${OCI_SSH_KEY:-${HOME}/Downloads/ssh-key-2026-06-02.key}}"
 
-# CA priority: cleaned proofmqtt CA → CA_DIR root → legacy issuing-ca fallback
+# CA priority: root-ca-nanomq.crt → root-ca-openssl.crt → auto re-sign from root-ca.key
 if [[ -f "$CA_DIR/root-ca-nanomq.crt" ]]; then
   ROOT_CA_FILE="$CA_DIR/root-ca-nanomq.crt"
 elif [[ -f "$CA_DIR/root-ca-openssl.crt" ]]; then
@@ -19,8 +20,6 @@ elif [[ -f "$CA_DIR/root-ca.crt" ]]; then
   openssl x509 -in "$CA_DIR/root-ca.crt" -signkey "$CA_DIR/root-ca.key" -sha256 -days 3650 -out "$ROOT_CA_FILE" 2>/dev/null \
     || openssl x509 -in "$CA_DIR/root-ca.crt" -out "$ROOT_CA_FILE" -outform PEM
   trap 'rm -f "$ROOT_CA_FILE"' EXIT
-elif [[ -f "${HERE}/certs/issuing-ca.crt" ]]; then
-  ROOT_CA_FILE="${HERE}/certs/issuing-ca.crt"
 else
   ROOT_CA_FILE=""
 fi
