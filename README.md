@@ -10,13 +10,92 @@ MQTT broker only, decoupled from **mqtt-publisher-lite**. Deploy this folder as 
 | `caddy-proxy/` | Caddy L4 TCP passthrough — public edge for `broker.withproof.io:8883` |
 | `generate-broker-cert-openssl.sh` | Issue `certs/broker.{crt,key}` from shared Root CA (`BROKER_SAN_DNS`, optional legacy `BROKER_RAILWAY_PROXY_HOST`) |
 | `print-railway-broker-env.sh` | Print raw PEM blocks for Railway `NANOMQ_TLS_*` variables |
-| `nanomq.conf` | mTLS listener on **8883**, `verify_peer` + `fail_if_no_peer_cert` |
+| `nanomq.conf` | Native mTLS on **8883** (OCI); same file for TLS listener settings |
 | `nanomq.plain.conf` | Plain MQTT **1883** (staging only) |
 | `docker-entrypoint.sh` | Writes PEMs from `NANOMQ_TLS_*` or uses mounted `/etc/nanomq/certs/` |
 | `railway.toml` / `railway.json` | Railway config-as-code |
 | `env.railway.example` | Variable template |
 | `docker-compose.yml` | Local stack: broker + Caddy on host `:8883` |
 | `.env.compose.example` | Optional compose overrides (Root CA path, debug) |
+| `setup-broker.sh` | Oracle Linux VM: install NanoMQ **0.24.13**, native mTLS config, systemd |
+| `deploy-certs.sh` | Copy PROOF-CA PEMs to VM (`tr -d '\r'`), restart `nanomq` |
+| `deploy-oci.sh` | OCI CLI: discover VM, open VCN **8883**, run setup + certs |
+| `deploy-oci.env.example` | Template for `OCI_COMPARTMENT_ID` / `OCI_INSTANCE_NAME` |
+
+## OCI VPS deploy (native mTLS, no stunnel)
+
+Production on Oracle Cloud uses **NanoMQ native `listeners.ssl`** on `0.0.0.0:8883`. Plain MQTT stays on **`127.0.0.1:1883`** (not exposed in the VCN). Same PROOF-CA and `certs/broker.{crt,key}` as Railway — no new CA.
+
+Docker/Railway in this repo may still use **stunnel** via [`docker-entrypoint.sh`](docker-entrypoint.sh); that path is unchanged.
+
+### Prerequisites
+
+- OCI CLI (`oci`) authenticated: `oci session authenticate --profile-name DEFAULT`
+- `jq` on your laptop (security-list updates)
+- SSH key at `~/.ssh/oci_nanomq_key` (or set `OCI_SSH_KEY`) — **must be in the instance `ssh_authorized_keys` at launch** (OCI cannot add it after boot via API)
+- Root CA at `../statsmqtt/data/ca/root-ca.crt` and broker certs in `./certs/`
+- VCN route `0.0.0.0/0` → Internet Gateway (`deploy-oci.sh` can create this via `OCI_ENSURE_IGW_ROUTE=1`)
+
+**Proof instance defaults** (see [`deploy-oci.env`](deploy-oci.env)): display name `Proof`, shape `VM.Standard.E2.1.Micro` (x86_64 RPM), tenancy compartment OCID.
+
+### One-shot deploy
+
+```bash
+export OCI_CLI_PROFILE=DEFAULT
+export OCI_COMPARTMENT_ID="ocid1.compartment.oc1..xxxx"
+export OCI_INSTANCE_NAME="your-vm-display-name"
+./deploy-oci.sh
+```
+
+`deploy-oci.sh` will:
+
+1. Find the RUNNING instance by display name
+2. Idempotently add VCN ingress **TCP 8883** (backs up security list JSON under `/tmp/`)
+3. `scp` `setup-broker.sh` + [`nanomq.conf`](nanomq.conf), run setup on the VM
+4. Run [`deploy-certs.sh`](deploy-certs.sh) (CRLF-safe PEMs, `systemctl restart nanomq`)
+
+Set `SKIP_NETWORK=1` to skip the security-list step (use after the first successful network pass).
+
+**Port 22 vs SSH auth:** `deploy-oci.sh` ensures ingress **TCP 22** and **8883** on the instance security list. If `nc -zv $OCI_PUBLIC_IP 22` succeeds but `ssh` says `Permission denied (publickey)`, the network is fine — add `~/.ssh/oci_nanomq_key.pub` to `/home/opc/.ssh/authorized_keys` via **OCI Console → Proof → Console connection** (serial), then re-run `SKIP_NETWORK=1 ./deploy-oci.sh`.
+
+Optional: set `OCI_SSH_INGRESS_CIDR` in `deploy-oci.env` to your office IP `/32` instead of `0.0.0.0/0` for SSH.
+
+### Manual steps
+
+```bash
+scp -i ~/.ssh/oci_nanomq_key setup-broker.sh nanomq.conf opc@<public-ip>:/tmp/
+ssh -i ~/.ssh/oci_nanomq_key opc@<public-ip> 'sudo bash /tmp/setup-broker.sh'
+./deploy-certs.sh opc@<public-ip>
+```
+
+Point **DNS** `broker.withproof.io` → instance public IP. Open **8883** only in the security list (not 1883).
+
+### NanoMQ version and packages
+
+Pinned to **[0.24.13](https://github.com/nanomq/nanomq/releases/tag/0.24.13)**. [`setup-broker.sh`](setup-broker.sh) installs the arch-matching **RPM**, then falls back to extracting the **`.deb`**:
+
+| VM arch | RPM | `.deb` fallback |
+|---------|-----|-----------------|
+| `aarch64` | `linux-arm64.rpm` | `linux-arm64.deb` |
+| `x86_64` | `linux-x86_64.rpm` | `linux-amd64.deb` |
+
+### Config bind syntax
+
+OCI [`nanomq.conf`](nanomq.conf) uses URI binds (`tls+nmq-tcp://0.0.0.0:8883`, `nmq-tcp://127.0.0.1:1883`). Official docs also allow `host:port` without a scheme — if `:8883` does not listen after deploy, switch binds to `0.0.0.0:8883` / `127.0.0.1:1883` and restart `nanomq`.
+
+### Verification
+
+```bash
+sudo systemctl status nanomq
+sudo ss -tlnp | grep -E '1883|8883'
+sudo journalctl -u nanomq -n 50   # expect tls url on :8883
+
+openssl s_client -connect broker.withproof.io:8883 -servername broker.withproof.io \
+  -CAfile ../statsmqtt/data/ca/root-ca.crt \
+  -cert /path/to/client.crt -key /path/to/client.key
+```
+
+If mbedTLS reports **-9568**, re-run `deploy-certs.sh` (CRLF sanitization) and restart `nanomq`.
 
 ## Migrate from Railway Compose (one service) to two services
 

@@ -10,9 +10,6 @@ CERT_DIR="/etc/nanomq/certs"
 
 mkdir -p "$CERT_DIR"
 
-# CRITICAL: Set config path explicitly for NanoMQ
-export NANOMQ_CONF_PATH="$CONF_TLS"
-
 # Kill base-image nanomq
 for _i in 1 2 3; do
   _count="$(ps aux | grep -c '[n]anomq' || true)"
@@ -56,9 +53,10 @@ done
 openssl pkey -in "$CERT_DIR/broker.key" -check -noout >/dev/null 2>&1 || {
   echo "[nanomq] ERROR: broker.key invalid" >&2; exit 1; }
 
-# ── Start NanoMQ in background ──
-echo "[nanomq] Starting NanoMQ with config: $NANOMQ_CONF_PATH"
-"$NANOMQ_BIN" start --conf "$NANOMQ_CONF_PATH" &
+# ── Start NanoMQ in background (plain on 1883; stunnel terminates mTLS on 8883) ──
+export NANOMQ_CONF_PATH="$CONF_PLAIN"
+echo "[nanomq] Starting NanoMQ (plain) with config: $CONF_PLAIN"
+"$NANOMQ_BIN" start --conf "$CONF_PLAIN" &
 NANOMQ_PID=$!
 
 sleep 3
